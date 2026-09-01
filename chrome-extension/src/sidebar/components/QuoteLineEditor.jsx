@@ -1,8 +1,8 @@
 /**
  * Quote Line Editor (2026-08-20)
  *
- * Bulk discount, per row override, multi select delete and drag reorder on a
- * Zoho Quote, committed in ONE atomic worker PUT with an undo token.
+ * Quantity and discount edits, multi select delete and drag reorder on a Zoho
+ * Quote, committed in ONE atomic worker PUT with an undo token.
  *
  * Fully controlled, exactly like SkuQuantityEditor: this file renders and
  * dispatches, and every decision (what changed, what dollars, what description,
@@ -40,6 +40,7 @@ import {
   resequence,
   setAllSelected,
   setRowDiscount,
+  setRowQuantity,
   summarizeDiff,
   rowMatchesEcomm,
   toggleRowSelected,
@@ -67,6 +68,122 @@ const CLONE_TERMS = [1, 3, 5, 7, 10];
 
 const money = (value) => `$${Number(value || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+/** Exact, bounded refresh option sent to preview and write. */
+export function cloneEolRefreshRequest(enabled, replacementPath = '') {
+  const normalizedPath = String(replacementPath || '').trim().toLowerCase();
+  return {
+    enabled: enabled === true,
+    replacementPath: enabled === true && ['1g', '10g'].includes(normalizedPath) ? normalizedPath : null,
+  };
+}
+
+/** Refresh transforms selected term clones; it does not add another clone. */
+export function requestedCloneCount(terms, refreshEnabled = false) {
+  const uniqueTerms = new Set((Array.isArray(terms) ? terms : []).map(Number).filter((term) => CLONE_TERMS.includes(term)));
+  return uniqueTerms.size || (refreshEnabled === true ? 1 : 0);
+}
+
+/** Fail closed unless this exact refresh request has a complete worker preview. */
+export function refreshClonePreviewReady(previews, terms, refreshEnabled = false, replacementPath = '') {
+  if (refreshEnabled !== true || !Array.isArray(previews)) return false;
+  const expectedCount = requestedCloneCount(terms, true);
+  if (expectedCount < 1 || previews.length !== expectedCount) return false;
+  const expectedPath = cloneEolRefreshRequest(true, replacementPath).replacementPath;
+  return previews.every((preview) => {
+    const refresh = preview?.eol_refresh;
+    if (preview?.available !== true || refresh?.enabled !== true || refresh?.complete !== true) return false;
+    if (!expectedPath) return true;
+    return String(refresh.replacement_path || '').trim().toLowerCase() === expectedPath;
+  });
+}
+
+const arrayOf = (value) => (Array.isArray(value) ? value : []);
+
+/** Normalize the worker's public refresh plan for one shared preview/result view. */
+export function cloneEolRefreshDetails(entry) {
+  const refresh = entry?.eol_refresh && typeof entry.eol_refresh === 'object' ? entry.eol_refresh : null;
+  const warnings = [...new Set([
+    ...arrayOf(refresh?.review_warnings),
+    ...arrayOf(entry?.review_warnings),
+    ...arrayOf(entry?.warnings),
+  ].map((warning) => String(warning || '').trim()).filter(Boolean))];
+  const unresolved = [...new Set([
+    ...arrayOf(refresh?.unresolved),
+    ...arrayOf(entry?.unresolved),
+  ].map((item) => {
+    if (typeof item === 'string' || typeof item === 'number') return String(item).trim();
+    return String(item?.source_model || item?.sku || item?.model || item?.id || item?.description || '').trim();
+  }).filter(Boolean))];
+  const rawAlternatives = arrayOf(refresh?.alternatives).length
+    ? refresh.alternatives
+    : arrayOf(entry?.alternatives);
+  const alternatives = rawAlternatives.map((item) => {
+    if (typeof item === 'string') return item;
+    return String(item?.sku || item?.model || item?.path || '').trim();
+  }).filter(Boolean);
+  return {
+    refresh,
+    replacements: arrayOf(refresh?.replacements),
+    warnings,
+    unresolved,
+    alternatives,
+  };
+}
+
+export function eolReplacementDescription(replacement, targetLine) {
+  const explicit = String(targetLine?.description || replacement?.description || '').trim();
+  if (explicit) return explicit;
+  const source = String(replacement?.source_model || '').trim().toUpperCase();
+  return source ? `Replaces EOL ${source}` : 'EOL replacement';
+}
+
+function EolRefreshSummary({ entry }) {
+  const details = cloneEolRefreshDetails(entry);
+  if (!details.refresh && details.warnings.length === 0 && details.unresolved.length === 0) return null;
+  const pathLabel = details.refresh?.replacement_path
+    ? ` · ${String(details.refresh.replacement_path).toUpperCase()} path`
+    : '';
+  return (
+    <div style={{ marginTop: 5, padding: 6, borderRadius: 6, background: '#fff8e1', border: '1px solid #f0d9a0' }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: '#8a6100' }}>
+        EOL refresh{pathLabel}: {details.replacements.length} replacement{details.replacements.length === 1 ? '' : 's'}
+      </div>
+      {details.replacements.map((replacement, replacementIndex) => (
+        <div key={`${replacement.source_model || 'eol'}-${replacementIndex}`} style={{ marginTop: 4 }}>
+          <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.TEXT_PRIMARY }}>
+            EOL {replacement.source_model || 'equipment'} → {arrayOf(replacement.target_lines).map((line) => line.sku).filter(Boolean).join(' + ') || 'replacement pending'}
+          </div>
+          {arrayOf(replacement.target_lines).map((line, lineIndex) => (
+            <div key={`${line.sku || 'target'}-${lineIndex}`} style={{ fontSize: 9, color: COLORS.TEXT_SECONDARY, paddingLeft: 8 }}>
+              {line.quantity} x {line.sku || 'target'}{line.role ? ` (${line.role})` : ''}
+              {Number(line.unit_price) > 0 ? ` at ${money(line.unit_price)} each` : ''}
+              {' · '}Description: "{eolReplacementDescription(replacement, line)}"
+            </div>
+          ))}
+          {replacement.license_review_required && (
+            <div style={{ fontSize: 9, color: '#8a6100', paddingLeft: 8 }}>License review required for this replacement.</div>
+          )}
+        </div>
+      ))}
+      {details.alternatives.length > 0 && (
+        <div style={{ fontSize: 9, color: '#8a6100', marginTop: 4 }}>
+          Available replacement paths: {details.alternatives.join(', ')}. Choose 1G or 10G above and preview again.
+        </div>
+      )}
+      {details.unresolved.length > 0 && (
+        <div style={{ fontSize: 9, color: '#c5221f', marginTop: 4 }}>
+          Unresolved EOL lines: {details.unresolved.join(', ')}
+        </div>
+      )}
+      {details.warnings.map((warning, index) => (
+        <div key={`${warning}-${index}`} style={{ fontSize: 9, color: '#8a6100', marginTop: 3 }}>
+          Review warning: {warning}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /**
  * @param {object}   props
  * @param {string}   props.recordId    Zoho record id parsed from the page URL
@@ -75,7 +192,7 @@ const money = (value) => `$${Number(value || 0).toLocaleString('en-US', { minimu
  * @param {Function} props.onCommit    async (payload) => worker result
  * @param {Function} [props.onMatchEcomm] async (recordId, module) => ecomm prices
  * @param {Function} [props.onLoadCosts]  async (recordId, module) => distributor costs
- * @param {Function} [props.onPreviewCloneTerms] async (recordId, terms) => clone previews
+ * @param {Function} [props.onPreviewCloneTerms] async (recordId, terms, eolRefresh) => clone previews
  * @param {Function} [props.onCloneTerms]  async (payload) => one result per term
  * @param {Function} [props.onClose]   present in the overlay, absent in the panel
  * @param {string}   [props.personId]
@@ -96,6 +213,7 @@ export default function QuoteLineEditor({
   const [original, setOriginal] = useState([]);
   const [rows, setRows] = useState([]);
   const [bulkPct, setBulkPct] = useState('');
+  const [writeDescriptions, setWriteDescriptions] = useState(true);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState('');
@@ -104,6 +222,8 @@ export default function QuoteLineEditor({
   const [ecommBusy, setEcommBusy] = useState(false);
   const [ecommNote, setEcommNote] = useState('');
   const [cloneTerms, setCloneTerms] = useState([]);
+  const [cloneEolRefresh, setCloneEolRefresh] = useState(false);
+  const [cloneReplacementPath, setCloneReplacementPath] = useState('');
   const [clonePreviews, setClonePreviews] = useState(null);
   const [cloneBusy, setCloneBusy] = useState(false);
   const [cloneNote, setCloneNote] = useState('');
@@ -131,6 +251,8 @@ export default function QuoteLineEditor({
     setClonePreviews(null);
     setCloneNote('');
     setCloneTerms([]);
+    setCloneEolRefresh(false);
+    setCloneReplacementPath('');
     try {
       const payload = await handlers.current.onLoad(recordId, module);
       if (payload?.error) { setLoadError(payload.error); setRows([]); setOriginal([]); setMeta(null); return; }
@@ -149,10 +271,21 @@ export default function QuoteLineEditor({
   useEffect(() => { load(); }, [load]);
 
   const validation = useMemo(() => validateRows(rows), [rows]);
-  const diff = useMemo(() => diffAgainstOriginal(original, rows), [original, rows]);
+  const diff = useMemo(
+    () => diffAgainstOriginal(original, rows, { writeDescriptions }),
+    [original, rows, writeDescriptions],
+  );
   const totals = useMemo(() => totalsForRows(original, rows), [original, rows]);
   const selectedCount = rows.filter((row) => row.selected && !row.deleted).length;
   const deletedCount = rows.filter((row) => row.deleted).length;
+  const cloneCount = requestedCloneCount(cloneTerms, cloneEolRefresh);
+  const cloneRequestReady = cloneCount > 0;
+  const cloneWriteReady = cloneRequestReady && (!cloneEolRefresh || refreshClonePreviewReady(
+    clonePreviews,
+    cloneTerms,
+    cloneEolRefresh,
+    cloneReplacementPath,
+  ));
 
   // Same idea as QuoteResult.jsx:81's quoteActionsBlocked: uncommitted edits
   // invalidate every downstream artifact, so the customer-facing affordances
@@ -246,20 +379,40 @@ export default function QuoteLineEditor({
 
   function toggleCloneTerm(term) {
     setCloneResults(null);
+    setClonePreviews(null);
     setCloneNote('');
     setCloneTerms((current) => (current.includes(term)
       ? current.filter((t) => t !== term)
       : [...current, term].sort((a, b) => a - b)));
   }
 
+  function toggleCloneEolRefresh(on) {
+    setCloneEolRefresh(on);
+    setCloneResults(null);
+    setClonePreviews(null);
+    setCloneNote('');
+  }
+
+  function chooseCloneReplacementPath(path) {
+    setCloneReplacementPath(path);
+    setCloneResults(null);
+    setClonePreviews(null);
+    setCloneNote('');
+  }
+
   /** Read-only: show what each selected term would produce, before creating anything. */
   async function previewClones() {
-    if (!onPreviewCloneTerms || cloneTerms.length === 0) return;
+    if (!onPreviewCloneTerms || !cloneRequestReady) return;
     setCloneBusy(true);
     setCloneNote('');
     setCloneResults(null);
+    setClonePreviews(null);
     try {
-      const response = await handlers.current.onPreviewCloneTerms(recordId, cloneTerms);
+      const response = await handlers.current.onPreviewCloneTerms(
+        recordId,
+        cloneTerms,
+        cloneEolRefreshRequest(cloneEolRefresh, cloneReplacementPath),
+      );
       if (response?.error) { setCloneNote(response.error); return; }
       setClonePreviews(Array.isArray(response?.previews) ? response.previews : []);
     } catch (err) {
@@ -278,12 +431,18 @@ export default function QuoteLineEditor({
    * would leave duplicate quotes behind.
    */
   async function runClones() {
-    if (!onCloneTerms || cloneTerms.length === 0) return;
+    if (!onCloneTerms || !cloneWriteReady) return;
     setCloneBusy(true);
     setCloneNote('');
     setCloneResults(null);
+    setClonePreviews(null);
     try {
-      const response = await handlers.current.onCloneTerms({ recordId, terms: cloneTerms, personId });
+      const response = await handlers.current.onCloneTerms({
+        recordId,
+        terms: cloneTerms,
+        personId,
+        eolRefresh: cloneEolRefreshRequest(cloneEolRefresh, cloneReplacementPath),
+      });
       if (response?.error) { setCloneNote(response.error); return; }
       const results = Array.isArray(response?.results) ? response.results : [];
       setCloneResults(results);
@@ -299,7 +458,12 @@ export default function QuoteLineEditor({
   }
 
   async function commit() {
-    const built = buildOpsPayload(original, rows, { recordId, module, personId });
+    const built = buildOpsPayload(original, rows, {
+      recordId,
+      module,
+      personId,
+      writeDescriptions,
+    });
     if (!built.ok) { setCommitError(built.error); return; }
     setBusy(true);
     setCommitError('');
@@ -488,8 +652,24 @@ export default function QuoteLineEditor({
             {marginNote}
           </div>
         )}
-        <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, marginTop: 5 }}>
-          Every line you touch has its description replaced with the discount, and a line set to 0% has its description cleared.
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6, fontSize: 10, color: COLORS.TEXT_PRIMARY, cursor: busy ? 'default' : 'pointer' }}>
+          <input
+            type="checkbox"
+            aria-label="Include discount percentage in line descriptions"
+            checked={writeDescriptions}
+            disabled={busy}
+            onChange={(event) => {
+              setWriteDescriptions(event.target.checked);
+              setCommitError('');
+              setCommitResult(null);
+            }}
+          />
+          Include discount percentage in line descriptions
+        </label>
+        <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, marginTop: 3 }}>
+          {writeDescriptions
+            ? 'Edited discount lines replace their description with the discount; 0% clears it.'
+            : 'Existing line descriptions, including blanks, will be preserved.'}
         </div>
         {ecommNote && (
           <div style={{ fontSize: 10, color: ecommNote.includes('could not') || ecommNote.includes('failed') ? '#8a6100' : '#188038', marginTop: 4 }}>
@@ -576,8 +756,21 @@ export default function QuoteLineEditor({
                     onClick={() => update(moveRow(rows, row.id, 'down'))}
                     style={{ fontSize: 7, lineHeight: 1, padding: '1px 3px', border: `1px solid ${COLORS.BORDER}`, borderRadius: 3, background: 'transparent', cursor: 'pointer' }}>▼</button>
                 </div>
+                <input
+                  aria-label={`Quantity for line ${index + 1}`}
+                  title="Quantity"
+                  type="number"
+                  inputMode="numeric"
+                  min="1"
+                  max="99999"
+                  step="1"
+                  value={row.qty}
+                  disabled={busy || row.deleted}
+                  onChange={(event) => update(setRowQuantity(rows, row.id, event.target.value))}
+                  style={{ ...S.in, width: 54, marginRight: 0, marginBottom: 0, padding: '3px 4px' }}
+                />
                 <span style={{ fontSize: 9, color: COLORS.TEXT_SECONDARY, whiteSpace: 'nowrap' }}>
-                  {row.qty} x {money(row.listPrice)}
+                  x {money(row.listPrice)}
                 </span>
                 <div style={{ flex: 1 }} />
                 <input
@@ -599,7 +792,9 @@ export default function QuoteLineEditor({
               {/* Line 3: only when there is something to say. */}
               {row.dirty && !row.deleted && (
                 <div style={{ fontSize: 9, color: '#8a6100', paddingLeft: 18, marginTop: 1 }}>
-                  description becomes "{descriptionForPct(row.discountPct) || '(blank)'}"
+                  {writeDescriptions
+                    ? `description becomes "${descriptionForPct(row.discountPct) || '(blank)'}"`
+                    : 'description stays as-is'}
                   {row.ecomm ? ` · ecomm ${money(row.ecomm.price)} each` : ''}
                   {row.cost ? ` · cost ${money(row.cost.distiTotal)}, profit ${money(row.cost.grossProfit)}` : ''}
                 </div>
@@ -638,14 +833,14 @@ export default function QuoteLineEditor({
         </div>
       )}
 
-      {/* ── 5. Clone onto other licence terms ── */}
+      {/* ── 5. Clone onto other licence terms and/or refresh EOL equipment ── */}
       {onCloneTerms && (
         <div style={{ ...S.sec, background: '#f3e5f5', border: '1px solid #e1bee7' }}>
-          <div style={{ ...S.lab, color: ZOHO_PURPLE }}>Clone with different terms</div>
+          <div style={{ ...S.lab, color: ZOHO_PURPLE }}>Clone quote options</div>
           <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, marginBottom: 6 }}>
-            Creates a NEW quote per term. Hardware carries over untouched; only termed licence
-            lines are swapped, priced at ecomm. 7 and 10 year have no ecomm price, so they use
-            the fixed co-term discount.
+            Creates a NEW quote per selected term. Term clones reprice the matching licences.
+            The optional EOL refresh replaces retired model-specific equipment with current
+            catalog models on each clone. Refresh can also create one clone without changing terms.
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             {CLONE_TERMS.map((term) => (
@@ -660,24 +855,76 @@ export default function QuoteLineEditor({
                 {term}yr
               </label>
             ))}
+          </div>
+          <div style={{ marginTop: 7, paddingTop: 7, borderTop: `1px solid ${COLORS.BORDER}` }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, color: COLORS.TEXT_PRIMARY, cursor: busy || cloneBusy ? 'default' : 'pointer' }}>
+              <input
+                type="checkbox"
+                aria-label="Include end-of-life equipment refresh"
+                checked={cloneEolRefresh}
+                disabled={busy || cloneBusy}
+                onChange={(event) => toggleCloneEolRefresh(event.target.checked)}
+              />
+              Replace EOL equipment with current models
+            </label>
+            {cloneEolRefresh && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 5, flexWrap: 'wrap' }}>
+                <label htmlFor="clone-eol-replacement-path" style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY }}>
+                  Replacement path
+                </label>
+                <select
+                  id="clone-eol-replacement-path"
+                  aria-label="EOL replacement path preference"
+                  value={cloneReplacementPath}
+                  disabled={busy || cloneBusy}
+                  onChange={(event) => chooseCloneReplacementPath(event.target.value)}
+                  style={{ ...S.in, marginRight: 0, marginBottom: 0, padding: '3px 5px' }}
+                >
+                  <option value="">Choose only when needed</option>
+                  <option value="1g">Prefer 1G replacement</option>
+                  <option value="10g">Prefer 10G replacement</option>
+                </select>
+                <span style={{ fontSize: 9, color: COLORS.TEXT_SECONDARY }}>
+                  A choice is required only when an EOL model has both paths.
+                </span>
+              </div>
+            )}
+            {cloneEolRefresh && (
+              <div style={{ fontSize: 9, color: COLORS.TEXT_SECONDARY, marginTop: 4 }}>
+                Replacement line descriptions always name the retired model as "Replaces EOL [model]".
+                {' '}Model-agnostic MR, MV, MT, and Systems Manager licences stay unchanged on a
+                refresh-only clone; selected term clones still move them to the selected term.
+              </div>
+            )}
+            {cloneEolRefresh && (
+              <div style={{ fontSize: 9, color: clonePreviews && !cloneWriteReady ? '#c5221f' : COLORS.TEXT_SECONDARY, marginTop: 4 }}>
+                {cloneWriteReady
+                  ? 'Refresh preview is complete. Review it below before cloning.'
+                  : clonePreviews
+                    ? 'Refresh preview is incomplete or unsupported. No quote can be created.'
+                    : 'Preview this exact refresh first. Clone unlocks only after every refresh plan is available and complete.'}
+              </div>
+            )}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 7, flexWrap: 'wrap' }}>
             <div style={{ flex: 1 }} />
             {onPreviewCloneTerms && (
-              <button type="button" style={S.btn} disabled={busy || cloneBusy || cloneTerms.length === 0} onClick={previewClones}>
+              <button type="button" style={S.btn} disabled={busy || cloneBusy || !cloneRequestReady} onClick={previewClones}>
                 {cloneBusy ? 'Working…' : 'Preview'}
               </button>
             )}
             <button
               type="button"
-              title="Create a new Zoho quote for each ticked term"
+              title="Create the previewed Zoho clone or clones"
               style={{
                 padding: '6px 12px', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 700,
-                background: (busy || cloneBusy || cloneTerms.length === 0) ? '#9aa0a6' : ZOHO_PURPLE,
-                color: '#fff', cursor: (busy || cloneBusy || cloneTerms.length === 0) ? 'default' : 'pointer',
+                background: (busy || cloneBusy || !cloneWriteReady) ? '#9aa0a6' : ZOHO_PURPLE,
+                color: '#fff', cursor: (busy || cloneBusy || !cloneWriteReady) ? 'default' : 'pointer',
               }}
-              disabled={busy || cloneBusy || cloneTerms.length === 0}
+              disabled={busy || cloneBusy || !cloneWriteReady}
               onClick={runClones}
             >
-              {cloneBusy ? 'Cloning…' : `Clone ${cloneTerms.length || ''} quote${cloneTerms.length === 1 ? '' : 's'}`.trim()}
+              {cloneBusy ? 'Cloning…' : `Clone ${cloneCount} quote${cloneCount === 1 ? '' : 's'}`}
             </button>
           </div>
 
@@ -688,72 +935,83 @@ export default function QuoteLineEditor({
             </div>
           )}
           {cloneNote && (
-            <div style={{ fontSize: 10, marginTop: 5, color: /fail|could not|of \d+ clone/.test(cloneNote) ? '#c5221f' : '#188038' }}>
+            <div style={{ fontSize: 10, marginTop: 5, color: /fail|could not|of \d+ clone|must|required|nothing/i.test(cloneNote) ? '#c5221f' : '#188038' }}>
               {cloneNote}
             </div>
           )}
 
           {/* Preview: what each term would produce. Nothing has been created. */}
-          {clonePreviews && !cloneResults && clonePreviews.map((preview) => (
-            <div key={preview.target_term} style={{ marginTop: 6, paddingTop: 5, borderTop: `1px solid ${COLORS.BORDER}` }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: preview.available ? COLORS.TEXT_PRIMARY : '#c5221f' }}>
-                {preview.target_term} year
-                {preview.available
-                  ? ` · ${preview.swaps.length} licence line(s), ${preview.untouched_count} carried over`
-                  : ' · not possible'}
+          {clonePreviews && !cloneResults && clonePreviews.map((preview, previewIndex) => {
+            const swaps = arrayOf(preview.swaps);
+            const refresh = cloneEolRefreshDetails(preview);
+            const label = preview.target_term ? `${preview.target_term} year` : 'Refresh only';
+            return (
+              <div key={`${preview.target_term ?? 'refresh'}-${previewIndex}`} style={{ marginTop: 6, paddingTop: 5, borderTop: `1px solid ${COLORS.BORDER}` }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: preview.available ? COLORS.TEXT_PRIMARY : '#c5221f' }}>
+                  {label}
+                  {preview.available
+                    ? ` · ${swaps.length} licence line(s), ${refresh.replacements.length} EOL replacement(s), ${preview.untouched_count || 0} carried over`
+                    : ' · not possible'}
+                </div>
+                {!preview.available && (
+                  <div style={{ fontSize: 9, color: '#c5221f' }}>{preview.message}</div>
+                )}
+                {preview.available && swaps.map((swap, swapIndex) => (
+                  <div key={`${swap.sku || 'swap'}-${swapIndex}`} style={{ fontSize: 9, color: COLORS.TEXT_SECONDARY }}>
+                    {swap.quantity} x {swap.sku} becomes {swap.target_sku} at {money(swap.unit_price)} each
+                    {swap.pricing === 'ecomm' ? ' (ecomm)' : ` (${swap.discount_pct}% off list, co-term)`}
+                  </div>
+                ))}
+                {preview.available && swaps.length > 0 && (
+                  <div style={{ fontSize: 10, color: COLORS.TEXT_PRIMARY, marginTop: 2 }}>
+                    licences {money(preview.licence_total_before)} becomes {money(preview.licence_total_after)}
+                  </div>
+                )}
+                <EolRefreshSummary entry={preview} />
               </div>
-              {!preview.available && (
-                <div style={{ fontSize: 9, color: '#c5221f' }}>{preview.message}</div>
-              )}
-              {preview.available && preview.swaps.map((swap) => (
-                <div key={swap.sku} style={{ fontSize: 9, color: COLORS.TEXT_SECONDARY }}>
-                  {swap.quantity} x {swap.sku} becomes {swap.target_sku} at {money(swap.unit_price)} each
-                  {swap.pricing === 'ecomm' ? ' (ecomm)' : ` (${swap.discount_pct}% off list, co-term)`}
-                </div>
-              ))}
-              {preview.available && (
-                <div style={{ fontSize: 10, color: COLORS.TEXT_PRIMARY, marginTop: 2 }}>
-                  licences {money(preview.licence_total_before)} becomes {money(preview.licence_total_after)}
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
 
           {/* Results: real records now exist, so every one is reported. */}
-          {cloneResults && cloneResults.map((result) => (
-            <div
-              key={result.target_term}
-              style={{
-                marginTop: 6, padding: 6, borderRadius: 6,
-                background: result.success ? '#e6f4ea' : '#fce8e6',
-                border: `1px solid ${result.success ? '#b7e1c4' : '#f5c6c2'}`,
-              }}
-            >
-              <div style={{ fontSize: 11, fontWeight: 700, color: result.success ? '#188038' : COLORS.ERROR }}>
-                {result.target_term} year {result.success ? 'created and verified' : 'did not complete'}
+          {cloneResults && cloneResults.map((result, resultIndex) => {
+            const refresh = cloneEolRefreshDetails(result);
+            const label = result.target_term ? `${result.target_term} year` : 'Refresh only';
+            return (
+              <div
+                key={`${result.cloned_quote_id || result.target_term || 'refresh'}-${resultIndex}`}
+                style={{
+                  marginTop: 6, padding: 6, borderRadius: 6,
+                  background: result.success ? '#e6f4ea' : '#fce8e6',
+                  border: `1px solid ${result.success ? '#b7e1c4' : '#f5c6c2'}`,
+                }}
+              >
+                <div style={{ fontSize: 11, fontWeight: 700, color: result.success ? '#188038' : COLORS.ERROR }}>
+                  {label} {result.success ? 'created and verified' : 'did not complete'}
+                </div>
+                {result.success && (
+                  <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY }}>
+                    {arrayOf(result.swaps).length} licence line(s) swapped, {refresh.replacements.length} EOL replacement(s), {arrayOf(result.untouched).length} carried over.
+                    {result.clone_grand_total != null ? ` Total ${money(result.clone_grand_total)}.` : ''}
+                  </div>
+                )}
+                {!result.success && (
+                  <div style={{ fontSize: 10, color: COLORS.ERROR }}>{result.message}</div>
+                )}
+                <EolRefreshSummary entry={result} />
+                {result.cloned_quote_url && (
+                  <a href={result.cloned_quote_url} target="_blank" rel="noreferrer"
+                    style={{ display: 'inline-block', marginTop: 3, fontSize: 10, color: COLORS.STRATUS_BLUE }}>
+                    Open {result.cloned_quote_number || 'the clone'} in Zoho ↗
+                  </a>
+                )}
+                {result._undo_token && (
+                  <div style={{ fontSize: 9, color: COLORS.TEXT_SECONDARY, marginTop: 2 }}>
+                    Undo token: <code>{result._undo_token}</code>
+                  </div>
+                )}
               </div>
-              {result.success && (
-                <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY }}>
-                  {result.swaps?.length || 0} licence line(s) swapped, {result.untouched?.length || 0} carried over.
-                  {result.clone_grand_total != null ? ` Total ${money(result.clone_grand_total)}.` : ''}
-                </div>
-              )}
-              {!result.success && (
-                <div style={{ fontSize: 10, color: COLORS.ERROR }}>{result.message}</div>
-              )}
-              {result.cloned_quote_url && (
-                <a href={result.cloned_quote_url} target="_blank" rel="noreferrer"
-                  style={{ display: 'inline-block', marginTop: 3, fontSize: 10, color: COLORS.STRATUS_BLUE }}>
-                  Open {result.cloned_quote_number || 'the clone'} in Zoho ↗
-                </a>
-              )}
-              {result._undo_token && (
-                <div style={{ fontSize: 9, color: COLORS.TEXT_SECONDARY, marginTop: 2 }}>
-                  Undo token: <code>{result._undo_token}</code>
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -809,6 +1067,7 @@ export default function QuoteLineEditor({
 function summarizeCommit(result) {
   const parts = [];
   if (result?.lines?.length) parts.push(`${result.lines.length} line${result.lines.length === 1 ? '' : 's'} repriced`);
+  if (result?.quantities?.length) parts.push(`${result.quantities.length} quantity change${result.quantities.length === 1 ? '' : 's'}`);
   if (result?.deletes?.length) parts.push(`${result.deletes.length} deleted`);
   if (result?.reorder?.length) parts.push('reordered');
   const detail = parts.length ? parts.join(', ') : 'quote updated';

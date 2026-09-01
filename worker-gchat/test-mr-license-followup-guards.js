@@ -35,8 +35,8 @@ t('create_deal_and_quote schema semantically forbids turning MR license requests
   const end = src.indexOf("name: 'create_quote_on_deal'", start);
   assert.ok(start > -1 && end > start, 'create_deal_and_quote tool definition must be isolatable');
   const tool = src.slice(start, end);
-  assert.match(tool, /For "MR licenses" use MR-ENT or LIC-ENT-\{term\}YR/);
-  assert.match(tool, /never substitute MR46\/MR44 hardware unless the user asked for AP hardware/);
+  assert.match(tool, /"MR licenses"\s+use MR-ENT or LIC-ENT-\{term\}YR/);
+  assert.match(tool, /never substitute MR46\/MR44 hardware unless the user asked for AP hardware/i);
   assert.match(tool, /For license-only requests,[\s\S]{0,180}do NOT invent hardware/);
   assert.match(tool, /License-only requests must stay license-only/);
 });

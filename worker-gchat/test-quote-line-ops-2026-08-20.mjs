@@ -87,6 +87,7 @@ function stubZoho({ items = baseItems(), mutate = null, putResponse = null } = {
         if (idx < 0) continue;
         if (Object.prototype.hasOwnProperty.call(row, '_delete')) { current.splice(idx, 1); continue; }
         const next = { ...current[idx] };
+        if ('Quantity' in row) next.Quantity = row.Quantity;
         if ('Discount' in row) next.Discount = row.Discount;
         if ('Description' in row) next.Description = row.Description;
         if ('Sequence_Number' in row) next.Sequence_Number = row.Sequence_Number;
@@ -144,6 +145,87 @@ test('Do_Not_Auto_Update_Prices: true rides in the same payload', async () => {
   await w.quoteLineOps(QUOTE_ID, 'Quotes', { setDiscounts: [{ id: 'r1', pct: 10 }] }, ENV, {});
   assert.equal(calls.puts.length, 1);
   assert.equal(calls.puts[0].data[0].Do_Not_Auto_Update_Prices, true);
+});
+
+test('a quantity edit writes quantity and recomputed discount together, then verifies both', async () => {
+  const calls = stubZoho();
+  const result = await w.quoteLineOps(QUOTE_ID, 'Quotes', {
+    setQuantities: [{ id: 'r2', qty: 35 }],
+    setDiscounts: [{ id: 'r2', pct: 15 }],
+  }, ENV, { writeDescriptions: false });
+
+  assert.equal(result.success, true, result.message);
+  assert.deepEqual(result.quantities, [{ id: 'r2', qty: 35 }]);
+  const row = modifyRows(calls.puts[0]).find((item) => item.id === 'r2');
+  assert.equal(row.Quantity, 35);
+  assert.equal(row.Discount, 2362.5, '450 list x 35 quantity x 15%');
+  assert.equal('Description' in row, false, 'unchecked description option preserves the existing note');
+  assert.equal(result.verification.success, true);
+});
+
+test('a quantity verification mismatch suppresses success and the undo token', async () => {
+  const calls = stubZoho({ mutate: (items) => items.map((item) => (
+    item.id === 'r2' ? { ...item, Quantity: 10 } : item
+  )) });
+  const result = await w.quoteLineOps(QUOTE_ID, 'Quotes', {
+    setQuantities: [{ id: 'r2', qty: 35 }],
+    setDiscounts: [{ id: 'r2', pct: 15 }],
+  }, ENV, {});
+
+  assert.equal(result.success, false);
+  assert.equal(calls.put, 1);
+  assert.match(result.verification.WARNING, /quantity did not land/);
+  assert.equal(result._undo_token, undefined);
+});
+
+test('an untouched row cannot disappear or change behind a plausible final count', async () => {
+  const disappeared = stubZoho({ mutate: (items) => [
+    ...items.filter((item) => item.id !== 'r4'),
+    {
+      id: 'balanced-ghost',
+      Product_Name: { id: 'p-ghost', name: 'Unexpected row', Product_Code: 'MA-CBL-40G-1M' },
+      Quantity: 2,
+      List_Price: 125,
+      Discount: 0,
+      Description: '',
+      Sequence_Number: 4,
+    },
+  ] });
+  const missingResult = await w.quoteLineOps(QUOTE_ID, 'Quotes', {
+    setQuantities: [{ id: 'r2', qty: 35 }],
+    setDiscounts: [{ id: 'r2', pct: 15 }],
+  }, ENV, { writeDescriptions: false });
+  assert.equal(missingResult.verification.line_count, baseItems().length,
+    'the balanced fixture must keep the old line count plausible');
+  assert.equal(missingResult.success, false);
+  assert.match(missingResult.verification.WARNING, /untouched row r4 is missing/i);
+  assert.equal(missingResult._undo_token, undefined);
+  assert.equal(disappeared.put, 1, 'verification failure must not retry the write');
+
+  const changed = stubZoho({ mutate: (items) => items.map((item) => (
+    item.id === 'r4'
+      ? {
+        ...item,
+        Product_Name: { id: 'p-other', name: 'Changed', Product_Code: 'MA-CBL-40G-1M' },
+        Quantity: 3,
+        List_Price: 126,
+        Discount: 1,
+        Description: 'changed behind the edit',
+      }
+      : item
+  )) });
+  const changedResult = await w.quoteLineOps(QUOTE_ID, 'Quotes', {
+    setQuantities: [{ id: 'r2', qty: 35 }],
+    setDiscounts: [{ id: 'r2', pct: 15 }],
+  }, ENV, { writeDescriptions: false });
+  assert.equal(changedResult.success, false);
+  assert.match(changedResult.verification.WARNING, /row r4: product changed unexpectedly/i);
+  assert.match(changedResult.verification.WARNING, /untouched row r4: quantity changed unexpectedly/i);
+  assert.match(changedResult.verification.WARNING, /row r4: list price changed unexpectedly/i);
+  assert.match(changedResult.verification.WARNING, /untouched row r4: discount changed unexpectedly/i);
+  assert.match(changedResult.verification.WARNING, /untouched row r4: description changed unexpectedly/i);
+  assert.equal(changedResult._undo_token, undefined);
+  assert.equal(changed.put, 1);
 });
 
 test('a 0% line clears its Description instead of writing "0% Discount"', async () => {
@@ -209,15 +291,20 @@ test('unknown, duplicate, conflicting and delete-everything op sets reject befor
     ['unknown id', { setDiscounts: [{ id: 'nope', pct: 10 }] }, 'unknown_ids'],
     ['unknown delete', { deletes: ['nope'] }, 'unknown_ids'],
     ['duplicate discount id', { setDiscounts: [{ id: 'r1', pct: 10 }, { id: 'r1', pct: 20 }] }, 'duplicate_op_ids'],
+    ['duplicate quantity id', { setQuantities: [{ id: 'r1', qty: 2 }, { id: 'r1', qty: 3 }], setDiscounts: [{ id: 'r1', pct: 10 }] }, 'duplicate_op_ids'],
     ['duplicate delete id', { deletes: ['r1', 'r1'] }, 'duplicate_op_ids'],
     ['delete everything', { deletes: ['r1', 'r2', 'r3', 'r4'] }, 'empty_quoted_items'],
     ['delete plus discount on the same row', { setDiscounts: [{ id: 'r1', pct: 10 }], deletes: ['r1'] }, 'delete_conflict'],
+    ['delete plus quantity on the same row', { setQuantities: [{ id: 'r1', qty: 2 }], setDiscounts: [{ id: 'r1', pct: 10 }], deletes: ['r1'] }, 'delete_conflict'],
     ['delete plus reorder on the same row', { deletes: ['r1'], reorder: ['r1', 'r2', 'r3'] }, 'delete_conflict'],
     ['partial reorder', { reorder: ['r1', 'r2'] }, 'partial_reorder'],
     ['no ops at all', {}, 'no_ops'],
     ['percent above 100', { setDiscounts: [{ id: 'r1', pct: 101 }] }, 'invalid_percent'],
     ['negative percent', { setDiscounts: [{ id: 'r1', pct: -1 }] }, 'invalid_percent'],
     ['non-numeric percent', { setDiscounts: [{ id: 'r1', pct: 'lots' }] }, 'invalid_percent'],
+    ['zero quantity', { setQuantities: [{ id: 'r1', qty: 0 }], setDiscounts: [{ id: 'r1', pct: 10 }] }, 'invalid_quantity'],
+    ['fractional quantity', { setQuantities: [{ id: 'r1', qty: 2.5 }], setDiscounts: [{ id: 'r1', pct: 10 }] }, 'invalid_quantity'],
+    ['quantity without discount percent', { setQuantities: [{ id: 'r1', qty: 2 }] }, 'quantity_requires_discount'],
   ]) {
     const calls = stubZoho();
     const result = await w.quoteLineOps(QUOTE_ID, 'Quotes', ops, ENV, {});

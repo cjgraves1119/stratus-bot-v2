@@ -898,11 +898,11 @@ registerMessageHandlers({
     return api.getQuoteLines(id, module || 'Quotes');
   },
 
-  // Read-only preview of a term clone. Writes nothing.
-  [MSG.PREVIEW_QUOTE_CLONE_TERMS]: async ({ recordId, terms }) => {
+  // Read-only preview of a term and/or EOL refresh clone. Writes nothing.
+  [MSG.PREVIEW_QUOTE_CLONE_TERMS]: async ({ recordId, terms, eolRefresh }) => {
     const id = String(recordId || '').trim();
     if (!/^\d{10,25}$/.test(id)) return { previews: [], error: 'A Zoho record id is required.' };
-    return api.previewQuoteCloneTerms(id, Array.isArray(terms) ? terms : undefined);
+    return api.previewQuoteCloneTerms(id, Array.isArray(terms) ? terms : undefined, eolRefresh);
   },
 
   // Creates NEW Zoho quotes, one per term. Never auto-retried: a retry after a

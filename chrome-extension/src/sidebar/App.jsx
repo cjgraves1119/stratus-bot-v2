@@ -121,7 +121,11 @@ export function QuoteLinesView({ recordId, module = 'Quotes', onClose }) {
     [],
   );
   const previewCloneTerms = useCallback(
-    (id, terms) => sendToBackground(MSG.PREVIEW_QUOTE_CLONE_TERMS, { recordId: id, terms }),
+    (id, terms, eolRefresh) => sendToBackground(MSG.PREVIEW_QUOTE_CLONE_TERMS, {
+      recordId: id,
+      terms,
+      eolRefresh,
+    }),
     [],
   );
   const cloneTerms = useCallback(

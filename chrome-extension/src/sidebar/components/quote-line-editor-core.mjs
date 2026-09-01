@@ -19,6 +19,12 @@
 // Zoho's own line cap for a quote we are willing to edit in one commit.
 const MAX_ROWS = 300;
 
+// Match the extension's existing editable-quote quantity boundary. Keeping this
+// well below Number.MAX_SAFE_INTEGER also makes every client/server multiply
+// deterministic and prevents an accidental exponent or decimal from being
+// normalized into a different customer quantity.
+const MAX_QUANTITY = 99999;
+
 // TWO decimals, because that is what Zoho itself writes. Its own margin function
 // stamps descriptions like "68.33% Discount" on the quote (verified on Quote
 // 2570562000422125077, 2026-08-20), and a margin-derived percent is never a
@@ -51,6 +57,20 @@ export function clampPct(value) {
   const clamped = Math.min(100, Math.max(0, n));
   const factor = 10 ** PCT_DECIMALS;
   return Math.round(clamped * factor) / factor;
+}
+
+/**
+ * Strict whole-line quantity normalization. Browser number inputs still hand us
+ * strings, so accept decimal digits only and return a real safe integer. Invalid
+ * intermediate values are rejected instead of truncated or rounded.
+ */
+export function normalizeQuantity(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const text = String(value).trim();
+  if (!/^\d+$/.test(text)) return null;
+  const quantity = Number(text);
+  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > MAX_QUANTITY) return null;
+  return quantity;
 }
 
 /**
@@ -195,6 +215,30 @@ export function setRowDiscount(rows, id, pct) {
     return {
       ...row,
       discountPct: n === null ? row.discountPct : n,
+      discountDollars: null,
+      ecomm: null,
+      ecommError: '',
+      cost: null,
+      costError: '',
+      dirty: true,
+    };
+  });
+}
+
+/**
+ * Per-row quantity edit. Quantity changes preserve the displayed discount
+ * percent, but drop exact-dollar ecomm/margin targets so the discount can be
+ * recomputed against the new line gross. The Worker receives both operations in
+ * one atomic request.
+ */
+export function setRowQuantity(rows, id, qty) {
+  const quantity = normalizeQuantity(qty);
+  if (quantity === null) return copy(rows);
+  return copy(rows).map((row) => {
+    if (row.id !== id || row.deleted || normalizeQuantity(row.qty) === quantity) return row;
+    return {
+      ...row,
+      qty: quantity,
       discountDollars: null,
       ecomm: null,
       ecommError: '',
@@ -455,12 +499,17 @@ export function validateRows(rows) {
     if (seen.has(row.id)) errors.push({ code: 'duplicate_id', message: `Line id ${row.id} appears twice. Reload the quote.` });
     seen.add(row.id);
     if (row.deleted) continue;
+    const qty = normalizeQuantity(row.qty);
+    if (qty === null) {
+      errors.push({ code: 'invalid_quantity', message: `${row.sku || row.id}: quantity must be a whole number from 1 to ${MAX_QUANTITY.toLocaleString('en-US')}.` });
+      continue;
+    }
     const pct = clampPct(row.discountPct);
     if (pct === null) {
       errors.push({ code: 'invalid_pct', message: `${row.sku || row.id}: enter a discount percent between 0 and 100.` });
       continue;
     }
-    const gross = roundMoney(moneyValue(row.listPrice) * (Number(row.qty) || 0));
+    const gross = roundMoney(moneyValue(row.listPrice) * qty);
     if (!(gross >= 0)) {
       errors.push({ code: 'invalid_line', message: `${row.sku || row.id}: list price or quantity is unreadable, so its discount cannot be validated.` });
       continue;
@@ -499,38 +548,46 @@ export function validateRows(rows) {
  * the rep made for some unrelated line. Chris chose description replacement on
  * the rows he EDITS, not a whole-quote normalization.
  */
-export function diffAgainstOriginal(original, rows) {
+export function diffAgainstOriginal(original, rows, options = {}) {
   const before = new Map((Array.isArray(original) ? original : []).map((row) => [row.id, row]));
   const list = Array.isArray(rows) ? rows : [];
+  const writeDescriptions = options.writeDescriptions !== false;
 
   const deletes = list.filter((row) => row.deleted && before.has(row.id)).map((row) => row.id);
   const deleted = new Set(deletes);
   const survivors = list.filter((row) => !deleted.has(row.id));
 
   const setDiscounts = [];
+  const setQuantities = [];
   const descriptionChanges = [];
   for (const row of survivors) {
     const was = before.get(row.id);
     if (!was) continue;
     const pct = clampPct(row.discountPct) ?? 0;
-    const wasPct = clampPct(was.discountPct) ?? 0;
     const nextDescription = descriptionForPct(pct);
     const dollars = effectiveDollars(row);
     const pctMoved = dollars !== effectiveDollars(was);
-    const descriptionMoved = nextDescription !== (was.description || '');
-    if (row.dirty === true && (pctMoved || descriptionMoved)) {
-      // `dollars` rides along ONLY for an ecomm match, where the exact gap
-      // matters more than the one-decimal percent. Everything else lets the
-      // worker recompute from the percent, so there is one source of truth.
+    const qty = normalizeQuantity(row.qty);
+    const wasQty = normalizeQuantity(was.qty);
+    const quantityMoved = qty !== null && wasQty !== null && qty !== wasQty;
+    const descriptionMoved = writeDescriptions && nextDescription !== (was.description || '');
+    if (row.dirty === true && quantityMoved) setQuantities.push({ id: row.id, qty });
+    if (row.dirty === true && (pctMoved || descriptionMoved || quantityMoved)) {
+      // A quantity edit clears its old exact-dollar target in setRowQuantity.
+      // Therefore any non-null dollars here were computed AFTER that edit by
+      // ecomm or margin pricing against the new quantity and must ride along.
+      // A still-null target lets the worker recompute from the reviewed percent.
       setDiscounts.push(row.discountDollars === null || row.discountDollars === undefined
         ? { id: row.id, pct }
         : { id: row.id, pct, dollars });
-      descriptionChanges.push({
-        id: row.id,
-        sku: row.sku,
-        from: was.description || '',
-        to: nextDescription,
-      });
+      if (descriptionMoved) {
+        descriptionChanges.push({
+          id: row.id,
+          sku: row.sku,
+          from: was.description || '',
+          to: nextDescription,
+        });
+      }
     }
   }
 
@@ -545,11 +602,12 @@ export function diffAgainstOriginal(original, rows) {
 
   return {
     setDiscounts,
+    setQuantities,
     deletes,
     reorder,
     descriptionChanges,
     unchanged: survivors.length - setDiscounts.length,
-    hasChanges: setDiscounts.length > 0 || deletes.length > 0 || reorder.length > 0,
+    hasChanges: setDiscounts.length > 0 || setQuantities.length > 0 || deletes.length > 0 || reorder.length > 0,
   };
 }
 
@@ -561,7 +619,8 @@ export function buildOpsPayload(original, rows, options = {}) {
   const validation = validateRows(rows);
   if (!validation.ok) return { ok: false, error: validation.error, errors: validation.errors, payload: null, diff: null };
 
-  const diff = diffAgainstOriginal(original, rows);
+  const writeDescriptions = options.writeDescriptions !== false;
+  const diff = diffAgainstOriginal(original, rows, { writeDescriptions });
   if (!diff.hasChanges) {
     return { ok: false, error: 'Nothing has changed yet.', errors: [{ code: 'no_op', message: 'Nothing has changed yet.' }], payload: null, diff };
   }
@@ -573,10 +632,11 @@ export function buildOpsPayload(original, rows, options = {}) {
       setDiscounts: diff.setDiscounts.map((op) => (op.dollars === undefined
         ? { id: op.id, pct: op.pct }
         : { id: op.id, pct: op.pct, dollars: op.dollars })),
+      setQuantities: diff.setQuantities.map((op) => ({ id: op.id, qty: op.qty })),
       deletes: diff.deletes.slice(),
       reorder: diff.reorder.slice(),
     },
-    writeDescriptions: options.writeDescriptions !== false,
+    writeDescriptions,
   };
   if (options.personId) payload.personId = String(options.personId);
   return { ok: true, error: '', errors: [], payload, diff };
@@ -586,22 +646,33 @@ export function buildOpsPayload(original, rows, options = {}) {
 export function summarizeDiff(diff) {
   if (!diff || !diff.hasChanges) return '';
   const parts = [];
+  const quantityOps = Array.isArray(diff.setQuantities) ? diff.setQuantities : [];
+  const quantityIds = new Set(quantityOps.map((op) => op.id));
+  const repricingOps = diff.setDiscounts.filter((op) => !quantityIds.has(op.id));
+  const quantityDiscounts = diff.setDiscounts.filter((op) => quantityIds.has(op.id));
   const byPct = new Map();
-  for (const op of diff.setDiscounts) byPct.set(op.pct, (byPct.get(op.pct) || 0) + 1);
+  for (const op of repricingOps) byPct.set(op.pct, (byPct.get(op.pct) || 0) + 1);
   // Enumerating every distinct percent reads well for a bulk fill ("3 lines to
   // 25%") and terribly for margin pricing, where each line lands on its own
   // number. Past a handful, say how many moved and let the row list carry the
   // detail.
   if (byPct.size > 3) {
-    const total = diff.setDiscounts.length;
+    const total = repricingOps.length;
     parts.push(`${total} line${total === 1 ? '' : 's'} repriced`);
   } else {
     for (const [pct, count] of [...byPct.entries()].sort((a, b) => b[0] - a[0])) {
       parts.push(`${count} line${count === 1 ? '' : 's'} to ${fmtPct(pct)}%`);
     }
   }
-  const exact = diff.setDiscounts.filter((op) => op.dollars !== undefined).length;
+  const exact = repricingOps.filter((op) => op.dollars !== undefined).length;
   if (exact) parts.push(`${exact} priced to an exact target`);
+  if (quantityOps.length) {
+    const quantityPcts = new Set(quantityDiscounts.map((op) => op.pct));
+    const discountNote = quantityPcts.size === 1
+      ? `, discount recalculated at ${fmtPct(quantityDiscounts[0].pct)}%`
+      : ', discounts recalculated';
+    parts.push(`${quantityOps.length} quantity change${quantityOps.length === 1 ? '' : 's'}${discountNote}`);
+  }
   if (diff.deletes.length) parts.push(`${diff.deletes.length} delete${diff.deletes.length === 1 ? '' : 's'}`);
   if (diff.reorder.length) parts.push('order changed');
   return parts.join(', ');

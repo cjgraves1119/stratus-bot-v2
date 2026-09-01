@@ -245,24 +245,30 @@ export async function getQuoteLineCosts(recordId, module = 'Quotes') {
 }
 
 /**
- * Preview what a term clone would do. Writes NOTHING: it runs the same
- * classification and pricing the clone would, so the card can show which
- * licences move, to which SKUs, at what price, before anything exists in Zoho.
+ * Preview what a term and/or EOL refresh clone would do. Writes NOTHING: it
+ * runs the same classification and pricing the clone would, so the card can
+ * show every licence swap and current-model replacement before Zoho is touched.
  */
-export async function previewQuoteCloneTerms(recordId, terms) {
-  return apiCall('/api/quote-clone-terms-preview', { recordId, terms }, { timeout: 45000 });
+export async function previewQuoteCloneTerms(recordId, terms, eolRefresh) {
+  const route = eolRefresh?.enabled === true
+    ? '/api/quote-clone-refresh-preview'
+    : '/api/quote-clone-terms-preview';
+  return apiCall(route, { recordId, terms, eolRefresh }, { timeout: 45000 });
 }
 
 /**
- * Clone the quote onto one or more licence terms. Creates a NEW Zoho quote per
- * term, hardware carried over untouched, licences swapped and priced at ecomm
- * (7YR/10YR take the fixed co-term discount, which has no ecomm equivalent).
+ * Clone the quote onto one or more licence terms, optionally replacing EOL
+ * model-specific equipment. A refresh transforms each selected term clone; a
+ * refresh-only request creates one clone without changing licence terms.
  *
  * 90s: each term is a clone plus a re-read plus an atomic PUT plus a
  * verification re-fetch, run sequentially. No retry anywhere on this path.
  */
 export async function cloneQuoteTerms(payload) {
-  return apiCall('/api/quote-clone-terms', payload, { timeout: 90000 });
+  const route = payload?.eolRefresh?.enabled === true
+    ? '/api/quote-clone-refresh'
+    : '/api/quote-clone-terms';
+  return apiCall(route, payload, { timeout: 90000 });
 }
 
 export async function commitQuoteLineOps(payload) {

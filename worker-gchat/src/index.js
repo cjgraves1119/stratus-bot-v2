@@ -2903,6 +2903,24 @@ function getLicenseSkus(baseSku, requestedTier) {
   return validated;
 }
 
+// EOL refreshes must remain reviewable even when old CRM/license metadata names
+// a tier the replacement family cannot sell. Prefer the requested tier when it
+// resolves to real catalog SKUs; otherwise fall back to the replacement model's
+// catalog-backed default. The returned review flag is authoritative: write-ready
+// CRM clone callers must fail closed when an explicit tier required fallback,
+// while read-only planners may surface the fallback only as review evidence.
+function eolReplacementLicensePlan(baseSku, requestedTier) {
+  const preferred = getLicenseSkus(baseSku, requestedTier);
+  if (preferred?.length) {
+    return { licenseSkus: preferred, licenseReviewRequired: false };
+  }
+  const fallback = requestedTier ? getLicenseSkus(baseSku, null) : null;
+  return {
+    licenseSkus: fallback?.length ? fallback : null,
+    licenseReviewRequired: true,
+  };
+}
+
 function isHardwareOnlyQuoteIntent(text) {
   return /\b(hardware\s*only|hw\s*only|no\s+licen[cs]e|without\s+licen[cs]e|remove\s+(?:the\s+)?licen[cs]e|just\s+(?:the\s+)?hardware)\b/i.test(String(text || ''));
 }
@@ -16529,6 +16547,7 @@ const QLE_MAX_ECOMM_LOOKUPS = 60;
  *
  * ops = {
  *   setDiscounts: [{ id, pct }],   // pct 0-100, dollars computed server-side
+ *   setQuantities:[{ id, qty }],   // positive integer; same id must carry a discount op
  *   deletes:      [id],            // {id, _delete: null} rows
  *   reorder:      [id, ...]        // full surviving order; index+1 = Sequence_Number
  * }
@@ -16580,6 +16599,12 @@ async function ecommPriceForSku(sku, env) {
     if (exact && !exact.error && exact.ecomm_price > 0) return roundMoney(exact.ecomm_price);
   } catch (_) { /* fall through to the cache */ }
   const cached = (typeof prices !== 'undefined') ? prices[String(sku).toUpperCase()] : null;
+  // v1.29.15's daily Woo scan retains the last known dollars for orphaned
+  // catalog rows but marks them explicitly unavailable. A positive frozen
+  // price is not storefront authority: after the live exact lookup misses,
+  // fail closed instead of cloning from that stale value. Older rows without
+  // the marker retain the historical cache fallback for compatibility.
+  if (cached?.ecomm_available === false) return null;
   const cachedPrice = moneyValue(cached?.price);
   return cachedPrice > 0 ? roundMoney(cachedPrice) : null;
 }
@@ -16634,6 +16659,366 @@ async function cloneQuoteRecord(quoteId, env) {
   return { success: true, id: String(parsed.record_id), via: 'deep_clone_tax_fallback' };
 }
 
+function normalizeCloneEolRefresh(raw) {
+  if (!raw || raw.enabled !== true) return { enabled: false, replacementPath: null, error: '' };
+  const replacementPath = String(raw.replacementPath || '').trim().toLowerCase();
+  if (replacementPath && !['1g', '10g'].includes(replacementPath)) {
+    return {
+      enabled: true,
+      replacementPath: null,
+      error: 'eolRefresh.replacementPath must be either 1g or 10g.',
+    };
+  }
+  return { enabled: true, replacementPath: replacementPath || null, error: '' };
+}
+
+function quoteHardwareEolModel(rawSku) {
+  const upper = String(rawSku || '').trim().toUpperCase();
+  if (!upper || upper.startsWith('LIC-')) return null;
+  const candidates = [
+    upper,
+    upper.replace(/-HW(?:-(?:NA|WW))?$/, ''),
+    upper.replace(/-(?:NA|WW)$/, ''),
+  ];
+  for (const candidate of [...new Set(candidates)]) {
+    if (candidate && isEol(candidate)) return candidate;
+  }
+  return null;
+}
+
+function quoteEolSourceModel(rawSku) {
+  const upper = String(rawSku || '').trim().toUpperCase();
+  return upper.startsWith('LIC-') ? quoteContractEolModel(upper) : quoteHardwareEolModel(upper);
+}
+
+// These licences cover a product family rather than identifying one retired
+// device model. They are never evidence for choosing refresh hardware. A
+// refresh-only clone carries them over byte-for-byte; a selected term clone may
+// still re-term them through the ordinary term-clone path.
+function quoteModelAgnosticRefreshLicense(rawSku) {
+  const upper = String(rawSku || '').trim().toUpperCase();
+  return /^(?:LIC-ENT-(?:10|[1357])YR|LIC-MR-ADV-(?:10|[1357])Y|LIC-MV-(?:10|[1357])YR|LIC-MT-(?:10|[1357])Y|LIC-SME-(?:10|[1357])YR)$/.test(upper);
+}
+
+function quoteLicenseTerm(rawSku) {
+  const match = String(rawSku || '').trim().toUpperCase().match(/-(10|[1357])(?:YR|Y-S\d+|Y)$/);
+  return match ? Number(match[1]) : null;
+}
+
+function subjectForEolRefresh(subject, termNum = null) {
+  const termed = termNum ? subjectForTerm(subject, termNum) : String(subject || '').trim();
+  if (/\b(?:EOL|END OF LIFE)\s+REFRESH\b/i.test(termed)) return termed;
+  return `${termed || 'Quote'} - EOL Refresh`;
+}
+
+async function cloneRefreshTargetLine(targetSku, qty, role, description, env, economicsCache) {
+  let unit = economicsCache.get(targetSku);
+  if (!unit) {
+    const econ = await resolveTargetLicenseEconomics(targetSku, env);
+    if (!econ?.product_id || econ.active === false || !(moneyValue(econ.list) > 0)) {
+      return { ok: false, error: `Target ${targetSku} is missing, inactive, or has no list price in Zoho.` };
+    }
+    const ecomm = await ecommPriceForSku(targetSku, env);
+    if (!(ecomm > 0)) {
+      return { ok: false, error: `Target ${targetSku} has no ecomm price on file.` };
+    }
+    const list = roundMoney(econ.list);
+    if (ecomm > list + 0.005) {
+      return { ok: false, error: `Target ${targetSku} has ecomm ${ecomm} above list ${list}.` };
+    }
+    unit = {
+      product_id: String(econ.product_id),
+      list,
+      unit_price: roundMoney(ecomm),
+    };
+    economicsCache.set(targetSku, unit);
+  }
+  const listTotal = roundMoney(unit.list * qty);
+  const netTotal = roundMoney(unit.unit_price * qty);
+  const discount = roundMoney(listTotal - netTotal);
+  return {
+    ok: true,
+    line: {
+      sku: targetSku,
+      role,
+      quantity: qty,
+      new_product_id: unit.product_id,
+      new_list: unit.list,
+      new_list_total: listTotal,
+      unit_price: unit.unit_price,
+      new_discount: discount,
+      new_net_total: netTotal,
+      discount_pct: listTotal > 0 ? Number(((discount / listTotal) * 100).toFixed(2)) : 0,
+      description,
+    },
+  };
+}
+
+function publicCloneEolRefresh(plan) {
+  if (!plan) return null;
+  return {
+    enabled: true,
+    complete: plan.complete === true,
+    replacement_path: plan.replacementPath || null,
+    replacements: (plan.replacements || []).map((replacement) => ({
+      source_model: replacement.source_model,
+      source_rows: replacement.source_rows.map((row) => ({
+        id: row.id,
+        sku: row.sku,
+        quantity: row.quantity,
+        role: row.role,
+      })),
+      target_lines: replacement.target_lines.map((line) => ({
+        sku: line.sku,
+        quantity: line.quantity,
+        role: line.role,
+        unit_price: line.unit_price,
+        discount_pct: line.discount_pct,
+        new_net_total: line.new_net_total,
+        description: line.description,
+      })),
+      description: replacement.description,
+      license_review_required: replacement.license_review_required === true,
+    })),
+    unresolved: plan.unresolved || [],
+    review_warnings: plan.reviewWarnings || [],
+  };
+}
+
+async function classifyEolRefreshLines(quotedItems, targetTerm, env, { codeOf, replacementPath }) {
+  const bad = (error, message, extra = {}) => ({
+    ok: false,
+    error,
+    message,
+    complete: false,
+    replacementPath,
+    replacements: extra.replacements || [],
+    unresolved: extra.unresolved || [],
+    reviewWarnings: extra.reviewWarnings || [],
+    ...extra,
+  });
+  const groups = new Map();
+  const ambiguousEolRows = [];
+  for (const item of quotedItems) {
+    const sku = codeOf(item);
+    const sourceModel = quoteEolSourceModel(sku);
+    if (!sourceModel) {
+      // Model-agnostic family licensing can legitimately sit beside EOL warning
+      // prose on a renewal quote. Chris explicitly chose to leave these rows
+      // alone: they identify no retired device, so they neither authorize nor
+      // block model-specific hardware replacement.
+      if (quoteModelAgnosticRefreshLicense(sku)) continue;
+
+      // Any other EOL-marked row that cannot be tied to a model remains a hard
+      // review boundary. Carrying unknown retired hardware would make an
+      // otherwise partial refresh look complete.
+      const description = String(item?.Description || '').trim();
+      if (/\b(?:EOL|END[\s-]+OF[\s-]+LIFE)\b|\bRECOMMENDED\s+UPGRADE\b/i.test(description)) {
+        ambiguousEolRows.push({
+          id: String(item?.id || ''),
+          sku: sku || '(unknown SKU)',
+          quantity: Number(item?.Quantity) || 0,
+          description,
+        });
+      }
+      continue;
+    }
+    const role = sku.startsWith('LIC-') ? 'license' : 'hardware';
+    const id = String(item?.id || '');
+    const quantity = Number(item?.Quantity);
+    const productId = String(item?.Product_Name?.id || '');
+    if (!id || !productId || !Number.isSafeInteger(quantity) || quantity <= 0) {
+      return bad('eol_source_ambiguous', `${sku || sourceModel}: the EOL source row is missing a stable id, product id, or whole-number quantity.`);
+    }
+    if (!groups.has(sourceModel)) groups.set(sourceModel, { sourceModel, rows: [] });
+    groups.get(sourceModel).rows.push({ id, product_id: productId, sku, quantity, role });
+  }
+
+  if (groups.size === 0 && ambiguousEolRows.length > 0) {
+    return bad('eol_source_ambiguous',
+      `${ambiguousEolRows.length} line(s) are marked EOL but do not identify the retired model (${ambiguousEolRows.map((row) => row.sku).join(', ')}). Preview cannot safely choose replacement hardware; add the old model to the quote before cloning.`, {
+        unresolved: ambiguousEolRows,
+        reviewWarnings: ['Generic MR, MV, and MT licence SKUs are model-agnostic. An EOL warning alone is not enough evidence to select replacement hardware.'],
+      });
+  }
+  if (groups.size === 0) {
+    return bad('nothing_to_refresh', 'No model-specific EOL hardware or licence rows were found. Model-agnostic MR, MV, MT, and Systems Manager licences are intentionally left unchanged and do not identify replacement hardware.');
+  }
+
+  const replacements = [];
+  const reviewWarnings = [];
+  const economicsCache = new Map();
+  for (const group of groups.values()) {
+    const mapped = checkEol(group.sourceModel);
+    if (!mapped) {
+      return bad('eol_mapping_missing', `No current replacement mapping exists for EOL ${group.sourceModel}.`, {
+        replacements,
+        unresolved: [group.sourceModel],
+        reviewWarnings,
+      });
+    }
+    if (Array.isArray(mapped) && !replacementPath) {
+      return bad('eol_replacement_choice_required', `${group.sourceModel} has both 1G and 10G replacement paths. Choose one in the preview before cloning.`, {
+        replacements,
+        unresolved: [group.sourceModel],
+        alternatives: mapped,
+        reviewWarnings,
+      });
+    }
+    const replacementModel = Array.isArray(mapped)
+      ? mapped[replacementPath === '10g' ? 1 : 0]
+      : mapped;
+    if (!replacementModel) {
+      return bad('eol_mapping_missing', `The ${replacementPath || 'selected'} replacement path has no current model for ${group.sourceModel}.`, {
+        replacements,
+        unresolved: [group.sourceModel],
+        reviewWarnings,
+      });
+    }
+    if (isEol(replacementModel)) {
+      return bad('eol_mapping_stale', `The mapped replacement ${replacementModel} for ${group.sourceModel} is also marked EOL. Nothing was cloned; update the authoritative replacement map first.`, {
+        replacements,
+        unresolved: [group.sourceModel],
+        reviewWarnings,
+      });
+    }
+
+    const hardwareRows = group.rows.filter((row) => row.role === 'hardware');
+    const licenseRows = group.rows.filter((row) => row.role === 'license');
+    const hardwareQty = hardwareRows.reduce((sum, row) => sum + row.quantity, 0);
+    const licenseQty = licenseRows.reduce((sum, row) => sum + row.quantity, 0);
+    if (hardwareQty && licenseQty && hardwareQty !== licenseQty) {
+      return bad('eol_quantity_conflict', `${group.sourceModel} has ${hardwareQty} hardware units but ${licenseQty} model-specific licences. Nothing was cloned because the replacement quantity is ambiguous.`, {
+        replacements,
+        unresolved: [group.sourceModel],
+        reviewWarnings,
+      });
+    }
+    const quantity = hardwareQty || licenseQty;
+    const description = `Replaces EOL ${group.sourceModel}`;
+    const targetLines = [];
+    const resolvedHardware = resolveCachedProduct(replacementModel);
+    if (!resolvedHardware.entry) {
+      return bad('eol_target_unavailable', `Replacement hardware ${replacementModel} for ${group.sourceModel} is not in the active product catalog.`, {
+        replacements,
+        unresolved: [group.sourceModel],
+        reviewWarnings,
+      });
+    }
+    const hardwareSku = resolvedHardware.key;
+    const hardwareLine = await cloneRefreshTargetLine(hardwareSku, quantity, 'hardware', description, env, economicsCache);
+    if (!hardwareLine.ok) {
+      return bad('eol_target_pricing_unavailable', hardwareLine.error, {
+        replacements,
+        unresolved: [group.sourceModel],
+        reviewWarnings,
+      });
+    }
+    targetLines.push(hardwareLine.line);
+
+    let licenseReviewRequired = false;
+    if (licenseRows.length > 0) {
+      const sourceTerms = [...new Set(licenseRows.map((row) => quoteLicenseTerm(row.sku)).filter(Boolean))];
+      if (sourceTerms.length !== 1 || licenseRows.some((row) => !quoteLicenseTerm(row.sku))) {
+        return bad('eol_source_ambiguous', `${group.sourceModel} has model-specific licence rows without one clear source term. Nothing was cloned.`, {
+          replacements,
+          unresolved: [group.sourceModel],
+          reviewWarnings,
+        });
+      }
+      const replacementTerm = targetTerm || sourceTerms[0];
+      if (![1, 3, 5].includes(replacementTerm)) {
+        return bad('eol_target_unavailable', `EOL refresh licences are catalog-backed for 1, 3, or 5 years; ${replacementTerm}-year replacement for ${group.sourceModel} requires manual review.`, {
+          replacements,
+          unresolved: [group.sourceModel],
+          reviewWarnings,
+        });
+      }
+      const sourceTiers = [...new Set(licenseRows.map((row) => directLicenseRequestedTier(row.sku)).filter(Boolean))];
+      if (sourceTiers.length > 1) {
+        return bad('eol_source_ambiguous', `${group.sourceModel} carries more than one licence tier (${sourceTiers.join(', ')}). Nothing was cloned.`, {
+          replacements,
+          unresolved: [group.sourceModel],
+          reviewWarnings,
+        });
+      }
+      const requestedSourceTier = sourceTiers[0] || null;
+      const replacementLicensePlan = eolReplacementLicensePlan(replacementModel, requestedSourceTier);
+      // The shared URL-option builder may retain a trusted hardware refresh with
+      // an explicit review warning, but a CRM clone is a write-ready plan. Never
+      // let its catalog fallback silently change an explicit source tier and
+      // still report complete:true. Stop before cloneQuoteRecord() and expose
+      // the exact fallback family only as review evidence.
+      if (requestedSourceTier && replacementLicensePlan.licenseReviewRequired === true) {
+        const fallbackSkus = (replacementLicensePlan.licenseSkus || []).map((license) => license.sku);
+        const warning = `${group.sourceModel} -> ${replacementModel}: the explicit ${requestedSourceTier} tier is unavailable on the replacement family; the catalog default (${fallbackSkus.join(', ') || 'no replacement licence'}) requires review.`;
+        return bad('eol_license_tier_review_required',
+          `${warning} NOTHING was cloned and no fallback tier was selected.`, {
+            replacements,
+            unresolved: [{
+              source_model: group.sourceModel,
+              replacement_model: replacementModel,
+              requested_tier: requestedSourceTier,
+              fallback_license_skus: fallbackSkus,
+            }],
+            reviewWarnings: [...reviewWarnings, warning],
+          });
+      }
+      const replacementLicense = replacementLicensePlan.licenseSkus
+        ?.find((license) => license.term === `${replacementTerm}Y`)?.sku;
+      if (!replacementLicense) {
+        return bad('eol_target_unavailable', `No ${replacementTerm}-year replacement licence could be confirmed for ${group.sourceModel} -> ${replacementModel}. Nothing was cloned.`, {
+          replacements,
+          unresolved: [group.sourceModel],
+          reviewWarnings,
+        });
+      }
+      licenseReviewRequired = replacementLicensePlan.licenseReviewRequired === true;
+      if (licenseReviewRequired) {
+        reviewWarnings.push(`${group.sourceModel} -> ${replacementModel}: the old tier was unavailable on the replacement family, so the catalog-backed default licence needs review.`);
+      }
+      const licenseLine = await cloneRefreshTargetLine(replacementLicense, licenseQty, 'license', description, env, economicsCache);
+      if (!licenseLine.ok) {
+        return bad('eol_target_pricing_unavailable', licenseLine.error, {
+          replacements,
+          unresolved: [group.sourceModel],
+          reviewWarnings,
+        });
+      }
+      targetLines.push(licenseLine.line);
+    }
+
+    replacements.push({
+      source_model: group.sourceModel,
+      source_rows: group.rows,
+      target_lines: targetLines,
+      description,
+      license_review_required: licenseReviewRequired,
+    });
+  }
+
+  if (ambiguousEolRows.length > 0) {
+    return bad('eol_source_ambiguous',
+      `${ambiguousEolRows.length} additional line(s) are marked EOL but do not identify the retired model (${ambiguousEolRows.map((row) => row.sku).join(', ')}). The model-specific replacements below are reviewable, but nothing was cloned because the refresh could not be proven complete.`, {
+        replacements,
+        unresolved: ambiguousEolRows,
+        reviewWarnings: [
+          ...reviewWarnings,
+          'Generic MR, MV, and MT licence SKUs are model-agnostic. Add the retired model before creating the refresh clone.',
+        ],
+      });
+  }
+
+  return {
+    ok: true,
+    complete: true,
+    replacementPath,
+    replacements,
+    unresolved: [],
+    reviewWarnings,
+  };
+}
+
 /**
  * Clone `recordId` and swap every termed licence line to `targetTerm`.
  *
@@ -16648,13 +17033,17 @@ async function cloneQuoteRecord(quoteId, env) {
  * on anything that should stop a clone, so the caller can fail BEFORE creating
  * a record in Zoho.
  */
-async function classifyQuoteForTerm(recordId, targetTerm, env) {
+async function classifyQuoteForTerm(recordId, targetTerm, env, options = {}) {
   const bad = (error, message, extra = {}) => ({ ok: false, error, message, target_term: targetTerm, ...extra });
 
-  const termStr = String(targetTerm).trim().toLowerCase();
+  const refreshSettings = normalizeCloneEolRefresh(options.eolRefresh);
+  if (refreshSettings.error) return bad('invalid_eol_refresh', refreshSettings.error);
+
+  const hasTargetTerm = targetTerm !== null && targetTerm !== undefined && String(targetTerm).trim() !== '';
+  const termStr = hasTargetTerm ? String(targetTerm).trim().toLowerCase() : '';
   const termMatch = termStr.match(/^(10|[1357])\s*(?:y|yr|year|years)?$/);
-  const termNum = termMatch ? Number(termMatch[1]) : NaN;
-  if (!CLONE_TERM_ALLOWED.includes(termNum)) {
+  const termNum = termMatch ? Number(termMatch[1]) : null;
+  if ((!hasTargetTerm && !refreshSettings.enabled) || (hasTargetTerm && !CLONE_TERM_ALLOWED.includes(termNum))) {
     return bad('invalid_term', `target_term "${targetTerm}" is not one of ${CLONE_TERM_ALLOWED.join(', ')}.`);
   }
 
@@ -16674,12 +17063,36 @@ async function classifyQuoteForTerm(recordId, targetTerm, env) {
     return String(c || '').trim().toUpperCase();
   };
 
+  let eolRefresh = null;
+  const refreshSourceIds = new Set();
+  if (refreshSettings.enabled) {
+    eolRefresh = await classifyEolRefreshLines(quotedItems, termNum, env, {
+      codeOf,
+      replacementPath: refreshSettings.replacementPath,
+    });
+    if (!eolRefresh.ok) {
+      return bad(eolRefresh.error, eolRefresh.message, {
+        review_required: true,
+        eol_refresh: publicCloneEolRefresh(eolRefresh),
+        alternatives: eolRefresh.alternatives,
+      });
+    }
+    for (const replacement of eolRefresh.replacements) {
+      for (const row of replacement.source_rows) refreshSourceIds.add(String(row.id));
+    }
+  }
+
   const swaps = [];      // licence lines to replace on the clone
   const untouched = [];  // hardware and anything else, carried as-is
   const unmapped = [];   // termed licence with no target sibling -> abort
   for (const item of quotedItems) {
     const sku = codeOf(item);
     const qty = Number(item.Quantity) || 0;
+    if (refreshSourceIds.has(String(item?.id || ''))) continue;
+    if (termNum === null) {
+      untouched.push({ sku: sku || item.id, qty, reason: 'refresh_only' });
+      continue;
+    }
     const isLicense = /^LIC-/i.test(sku);
     const isTermed = isLicense && /-(10|[1357])(?:YR|Y-S\d+|Y)$/i.test(sku);
     if (!isLicense || !isTermed) {
@@ -16745,38 +17158,66 @@ async function classifyQuoteForTerm(recordId, targetTerm, env) {
       { unmapped, untouched });
   }
   if (swaps.length === 0) {
+    if (eolRefresh?.replacements?.length) {
+      return { ok: true, termNum, quote, quotedItems, swaps, untouched, codeOf, eolRefresh };
+    }
     return bad('nothing_to_reterm',
       `Quote ${recordId} has no termed licence to move to ${termNum} year (every licence is already at ${termNum} year, or there are none). No clone was made.`,
       { untouched });
   }
-  return { ok: true, termNum, quote, quotedItems, swaps, untouched, codeOf };
+  return { ok: true, termNum, quote, quotedItems, swaps, untouched, codeOf, eolRefresh };
 }
 
-/** Read-only preview of what a term clone would do. Writes nothing. */
-async function previewCloneQuoteWithTerm(recordId, targetTerm, env) {
-  const c = await classifyQuoteForTerm(recordId, targetTerm, env);
+/** Read-only preview of what a term and/or EOL-refresh clone would do. */
+async function previewCloneQuoteWithTerm(recordId, targetTerm, env, options = {}) {
+  const c = await classifyQuoteForTerm(recordId, targetTerm, env, options);
+  const requestedTerm = targetTerm === null || targetTerm === undefined || String(targetTerm).trim() === ''
+    ? null : Number(targetTerm);
   if (!c.ok) {
-    return { target_term: Number(targetTerm), available: false, error: c.error, message: c.message, unmapped: c.unmapped || [] };
+    return {
+      target_term: requestedTerm,
+      available: false,
+      error: c.error,
+      message: c.message,
+      unmapped: c.unmapped || [],
+      review_required: c.review_required === true,
+      eol_refresh: c.eol_refresh || null,
+      alternatives: c.alternatives || [],
+    };
   }
   const licenceTotal = roundMoney(c.swaps.reduce((sum, s) => sum + s.new_net_total, 0));
   const replacedTotal = roundMoney(c.swaps.reduce((sum, s) => {
     const item = c.quotedItems.find((i) => String(i.id) === String(s.old_id));
     return sum + roundMoney(moneyValue(item?.List_Price) * (Number(item?.Quantity) || 0) - moneyValue(item?.Discount));
   }, 0));
+  const refreshSourceIds = new Set((c.eolRefresh?.replacements || [])
+    .flatMap((replacement) => replacement.source_rows.map((row) => String(row.id))));
+  const refreshTotalBefore = roundMoney(c.quotedItems.reduce((sum, item) => {
+    if (!refreshSourceIds.has(String(item?.id || ''))) return sum;
+    return sum + roundMoney(moneyValue(item?.List_Price) * (Number(item?.Quantity) || 0) - moneyValue(item?.Discount));
+  }, 0));
+  const refreshTotalAfter = roundMoney((c.eolRefresh?.replacements || []).reduce((sum, replacement) => (
+    sum + replacement.target_lines.reduce((lineSum, line) => lineSum + line.new_net_total, 0)
+  ), 0));
   return {
     target_term: c.termNum,
     available: true,
-    subject: subjectForTerm(c.quote.Subject, c.termNum),
+    subject: c.eolRefresh
+      ? subjectForEolRefresh(c.quote.Subject, c.termNum)
+      : subjectForTerm(c.quote.Subject, c.termNum),
     swaps: c.swaps.map((s) => ({
       sku: s.sku, target_sku: s.target_sku, quantity: s.quantity,
       unit_price: s.unit_price, new_net_total: s.new_net_total,
       discount_pct: s.discount_pct, pricing: s.pricing,
     })),
+    eol_refresh: publicCloneEolRefresh(c.eolRefresh),
     untouched_count: c.untouched.length,
     // What the licence portion costs before and after, so the card can show the
     // delta without implying the hardware moved (it does not).
     licence_total_before: replacedTotal,
     licence_total_after: licenceTotal,
+    refresh_total_before: refreshTotalBefore,
+    refresh_total_after: refreshTotalAfter,
     source_grand_total: moneyValue(c.quote.Grand_Total),
   };
 }
@@ -16787,10 +17228,20 @@ async function cloneQuoteWithTerm(recordId, targetTerm, env, options = {}) {
   const personId = options.personId || null;
 
   // ── 1. Classify and price every line. Nothing is written yet, so an
-  //       unmappable licence fails WITHOUT leaving an orphan quote in Zoho. ──
-  const classified = await classifyQuoteForTerm(recordId, targetTerm, env);
-  if (!classified.ok) return fail(classified.error, classified.message, { unmapped: classified.unmapped, untouched: classified.untouched });
-  const { termNum, quote, quotedItems, swaps, untouched, codeOf } = classified;
+  //       unmappable licence or incomplete EOL mapping leaves no orphan. ──
+  const classified = await classifyQuoteForTerm(recordId, targetTerm, env, options);
+  if (!classified.ok) {
+    return fail(classified.error, classified.message, {
+      unmapped: classified.unmapped,
+      untouched: classified.untouched,
+      review_required: classified.review_required === true,
+      eol_refresh: classified.eol_refresh || null,
+      alternatives: classified.alternatives || [],
+    });
+  }
+  const { termNum, quote, quotedItems, swaps, untouched, codeOf, eolRefresh } = classified;
+  const refreshSourceRows = (eolRefresh?.replacements || []).flatMap((replacement) => replacement.source_rows);
+  const refreshTargetLines = (eolRefresh?.replacements || []).flatMap((replacement) => replacement.target_lines);
 
   // ── 2. Clone. From here a record exists, so every later failure reports it. ──
   const cloned = await cloneQuoteRecord(recordId, env).catch((err) => ({ success: false, error: err.message }));
@@ -16805,44 +17256,86 @@ async function cloneQuoteWithTerm(recordId, targetTerm, env, options = {}) {
   catch (err) { cloneRecord = null; }
   if (!cloneRecord || !Array.isArray(cloneRecord.Quoted_Items)) {
     return fail('clone_unreadable',
-      `Quote ${recordId} was cloned to ${cloneId}, but the clone could not be read back, so its licences were NOT changed. The clone still carries the original terms.`,
+      `Quote ${recordId} was cloned to ${cloneId}, but the clone could not be read back, so no planned line changes were made. The clone still matches the source.`,
       { cloned_quote_id: cloneId, cloned_quote_url: cloneUrl });
   }
-  const clonePool = cloneRecord.Quoted_Items.map((i) => ({
-    id: i.id, product_id: String(i.Product_Name?.id || ''), qty: Number(i.Quantity) || 0, used: false,
+  const clonePool = cloneRecord.Quoted_Items.map((item) => ({
+    id: item.id, product_id: String(item.Product_Name?.id || ''), qty: Number(item.Quantity) || 0, used: false,
   }));
+  const originalCloneIds = new Set(clonePool.map((row) => String(row.id)));
   const missing = [];
-  for (const swap of swaps) {
-    const sourceItem = quotedItems.find((i) => String(i.id) === String(swap.old_id));
-    const productId = String(sourceItem?.Product_Name?.id || '');
-    const match = clonePool.find((c) => !c.used && c.product_id === productId && c.qty === swap.quantity);
-    if (!match) { missing.push(`${swap.sku} (no matching row on the clone)`); continue; }
+  const consumeCloneRow = (sourceProductId, quantity, label) => {
+    const match = clonePool.find((row) => !row.used
+      && row.product_id === String(sourceProductId || '')
+      && row.qty === Number(quantity));
+    if (!match) {
+      missing.push(`${label} (no matching row on the clone)`);
+      return null;
+    }
     match.used = true;
-    swap.clone_row_id = match.id;
+    return match.id;
+  };
+  for (const swap of swaps) {
+    const sourceItem = quotedItems.find((item) => String(item.id) === String(swap.old_id));
+    swap.clone_row_id = consumeCloneRow(sourceItem?.Product_Name?.id, swap.quantity, swap.sku);
+  }
+  for (const row of refreshSourceRows) {
+    row.clone_row_id = consumeCloneRow(row.product_id, row.quantity, `${row.sku} (EOL refresh)`);
   }
   if (missing.length > 0) {
     return fail('clone_row_match_failed',
-      `Quote ${recordId} was cloned to ${cloneId}, but ${missing.length} licence row(s) could not be located on the clone, so NOTHING was changed on it: ${missing.join('; ')}. The clone still carries the original terms.`,
+      `Quote ${recordId} was cloned to ${cloneId}, but ${missing.length} planned row(s) could not be located on the clone, so NOTHING was changed on it: ${missing.join('; ')}. The clone still matches the source.`,
       { cloned_quote_id: cloneId, cloned_quote_url: cloneUrl, missing });
   }
+  const plannedDeleteIds = new Set([
+    ...swaps.map((swap) => String(swap.clone_row_id)),
+    ...refreshSourceRows.map((row) => String(row.clone_row_id)),
+  ]);
+  const preservedCloneRows = cloneRecord.Quoted_Items
+    .filter((row) => !plannedDeleteIds.has(String(row.id)))
+    .map((row) => ({
+      id: String(row.id),
+      product_id: String(row.Product_Name?.id || ''),
+      quantity: Number(row.Quantity) || 0,
+      list_price: moneyValue(row.List_Price),
+      discount: moneyValue(row.Discount),
+      description: typeof row.Description === 'string' ? row.Description : '',
+      sequence: row.Sequence_Number === null || row.Sequence_Number === undefined
+        ? null : Number(row.Sequence_Number),
+    }));
 
-  // ── 4. ONE atomic PUT on the clone: delete each old licence row, add its
-  //       target-term row. Hardware rows are omitted, so the additive PUT
-  //       leaves them exactly as the clone received them. ──
-  const subformPayload = swaps.flatMap((s) => ([
-    { id: s.clone_row_id, _delete: null },
-    {
-      Product_Name: { id: s.new_product_id },
-      Quantity: s.quantity,
-      List_Price: s.new_list,
-      Discount: s.new_discount,
-      ...(s.sequence !== undefined && s.sequence !== null ? { Sequence_Number: s.sequence } : {}),
-      ...(s.description ? { Description: s.description } : {}),
-    },
-  ]));
-  scrubMarginFromQuotedItems(subformPayload, 'Quoted_Items (clone with term)');
+  // ── 4. ONE atomic PUT: normal term swaps plus EOL source deletes and their
+  //       current-model replacements. Every refresh description names the old
+  //       model and is independent of the editor's discount-description toggle. ──
+  const subformPayload = [];
+  for (const swap of swaps) {
+    subformPayload.push(
+      { id: swap.clone_row_id, _delete: null },
+      {
+        Product_Name: { id: swap.new_product_id },
+        Quantity: swap.quantity,
+        List_Price: swap.new_list,
+        Discount: swap.new_discount,
+        ...(swap.sequence !== undefined && swap.sequence !== null ? { Sequence_Number: swap.sequence } : {}),
+        ...(swap.description ? { Description: swap.description } : {}),
+      },
+    );
+  }
+  for (const row of refreshSourceRows) subformPayload.push({ id: row.clone_row_id, _delete: null });
+  for (const line of refreshTargetLines) {
+    subformPayload.push({
+      Product_Name: { id: line.new_product_id },
+      Quantity: line.quantity,
+      List_Price: line.new_list,
+      Discount: line.new_discount,
+      Description: line.description,
+    });
+  }
+  scrubMarginFromQuotedItems(subformPayload, 'Quoted_Items (term/EOL refresh clone)');
 
-  const newSubject = subjectForTerm(quote.Subject, termNum);
+  const newSubject = eolRefresh
+    ? subjectForEolRefresh(quote.Subject, termNum)
+    : subjectForTerm(quote.Subject, termNum);
   let putResult;
   try {
     putResult = await zohoApiCall('PUT', `Quotes/${cloneId}`, env, {
@@ -16850,18 +17343,19 @@ async function cloneQuoteWithTerm(recordId, targetTerm, env, options = {}) {
     });
   } catch (err) {
     return fail('write_failed',
-      `Quote ${recordId} was cloned to ${cloneId}, but the licence swap threw: ${err.message}. The clone still carries the original terms.`,
+      `Quote ${recordId} was cloned to ${cloneId}, but the planned line update threw: ${err.message}. Re-check the clone.`,
       { cloned_quote_id: cloneId, cloned_quote_url: cloneUrl });
   }
-  const putParsed = parseZohoResponse(putResult, 'Clone licence re-term');
+  const putParsed = parseZohoResponse(putResult, 'Term/EOL refresh clone');
   if (putParsed?.success === false) {
     return fail('write_rejected',
-      `Quote ${recordId} was cloned to ${cloneId}, but Zoho rejected the licence swap: ${putParsed.message || 'unknown error'}. Re-check the clone.`,
+      `Quote ${recordId} was cloned to ${cloneId}, but Zoho rejected the planned line update: ${putParsed.message || 'unknown error'}. Re-check the clone.`,
       { cloned_quote_id: cloneId, cloned_quote_url: cloneUrl });
   }
 
-  // ── 5. Verify the clone: old rows gone, no licence left off-term, every new
-  //       line carries its discount, and the hardware count is unchanged. ──
+  // ── 5. Re-read and verify a multiset, not merely "some row with this SKU".
+  //       New rows must have ids absent from the clone snapshot, and each can
+  //       satisfy only one expected addition. ──
   let after = null;
   try { after = await fetchRecordFull('Quotes', cloneId, env); } catch (_) { after = null; }
   const verification = { verified: false, success: false };
@@ -16869,27 +17363,97 @@ async function cloneQuoteWithTerm(recordId, targetTerm, env, options = {}) {
     verification.WARNING = `The clone ${cloneId} was written but could not be re-read, so it is UNVERIFIED. Do NOT claim success; re-check it.`;
   } else {
     const rows = after.Quoted_Items;
-    const ids = new Set(rows.map((i) => String(i.id)));
+    const ids = new Set(rows.map((item) => String(item.id)));
     const mismatches = [];
-    for (const s of swaps) {
-      if (ids.has(String(s.clone_row_id))) mismatches.push(`${s.sku}: the old licence row is still on the clone`);
+    const deletedPlans = [
+      ...swaps.map((swap) => ({ id: swap.clone_row_id, sku: swap.sku })),
+      ...refreshSourceRows.map((row) => ({ id: row.clone_row_id, sku: row.sku })),
+    ];
+    for (const deleted of deletedPlans) {
+      if (ids.has(String(deleted.id))) mismatches.push(`${deleted.sku}: the source row is still on the clone`);
     }
-    for (const row of rows) {
-      const sku = codeOf(row);
-      if (!/^LIC-/i.test(sku)) continue;
-      const m = sku.match(/-(10|[1357])(?:YR|Y-S\d+|Y)$/i);
-      if (m && Number(m[1]) !== termNum) mismatches.push(`${sku} is still at ${m[1]} year`);
+    const rowsById = new Map(rows.map((row) => [String(row.id), row]));
+    for (const expected of preservedCloneRows) {
+      const got = rowsById.get(expected.id);
+      if (!got) {
+        mismatches.push(`untouched row ${expected.id} is missing`);
+        continue;
+      }
+      if (String(got.Product_Name?.id || '') !== expected.product_id) {
+        mismatches.push(`untouched row ${expected.id}: product changed`);
+      }
+      if (Number(got.Quantity) !== expected.quantity) {
+        mismatches.push(`untouched row ${expected.id}: quantity changed`);
+      }
+      if (Math.abs(moneyValue(got.List_Price) - expected.list_price) > 0.02) {
+        mismatches.push(`untouched row ${expected.id}: list price changed`);
+      }
+      if (Math.abs(moneyValue(got.Discount) - expected.discount) > 0.02) {
+        mismatches.push(`untouched row ${expected.id}: discount changed`);
+      }
+      if (String(got.Description || '') !== expected.description) {
+        mismatches.push(`untouched row ${expected.id}: description changed`);
+      }
+      const gotSequence = got.Sequence_Number === null || got.Sequence_Number === undefined
+        ? null : Number(got.Sequence_Number);
+      if (gotSequence !== expected.sequence) mismatches.push(`untouched row ${expected.id}: sequence changed`);
     }
-    for (const s of swaps) {
-      const got = rows.find((i) => codeOf(i) === s.target_sku);
-      if (!got) { mismatches.push(`${s.target_sku} is missing from the clone`); continue; }
-      if (Math.abs(moneyValue(got.Discount) - s.new_discount) > 0.5) {
-        mismatches.push(`${s.target_sku}: discount did not land (wanted $${s.new_discount}, got $${moneyValue(got.Discount)})`);
+    if (termNum !== null) {
+      for (const row of rows) {
+        const sku = codeOf(row);
+        if (!/^LIC-/i.test(sku)) continue;
+        const match = sku.match(/-(10|[1357])(?:YR|Y-S\d+|Y)$/i);
+        if (match && Number(match[1]) !== termNum) mismatches.push(`${sku} is still at ${match[1]} year`);
       }
     }
-    if (rows.length !== quotedItems.length) {
-      mismatches.push(`line count is ${rows.length}, expected ${quotedItems.length}`);
+
+    const additions = rows
+      .filter((row) => !originalCloneIds.has(String(row.id)))
+      .map((row) => ({ row, used: false }));
+    const expectedAdds = [
+      ...swaps.map((swap) => ({
+        sku: swap.target_sku,
+        product_id: swap.new_product_id,
+        quantity: swap.quantity,
+        list_price: swap.new_list,
+        discount: swap.new_discount,
+        description: swap.description,
+        requireDescription: false,
+      })),
+      ...refreshTargetLines.map((line) => ({
+        sku: line.sku,
+        product_id: line.new_product_id,
+        quantity: line.quantity,
+        list_price: line.new_list,
+        discount: line.new_discount,
+        description: line.description,
+        requireDescription: true,
+      })),
+    ];
+    for (const expected of expectedAdds) {
+      const candidate = additions.find((entry) => !entry.used
+        && codeOf(entry.row) === expected.sku
+        && String(entry.row.Product_Name?.id || '') === String(expected.product_id)
+        && Number(entry.row.Quantity) === expected.quantity);
+      if (!candidate) {
+        mismatches.push(`${expected.sku} x ${expected.quantity} is missing from the clone`);
+        continue;
+      }
+      candidate.used = true;
+      if (Math.abs(moneyValue(candidate.row.List_Price) - expected.list_price) > 0.02) {
+        mismatches.push(`${expected.sku}: list price did not land (wanted $${expected.list_price}, got $${moneyValue(candidate.row.List_Price)})`);
+      }
+      if (Math.abs(moneyValue(candidate.row.Discount) - expected.discount) > 0.5) {
+        mismatches.push(`${expected.sku}: discount did not land (wanted $${expected.discount}, got $${moneyValue(candidate.row.Discount)})`);
+      }
+      if (expected.requireDescription && String(candidate.row.Description || '') !== expected.description) {
+        mismatches.push(`${expected.sku}: description must be "${expected.description}"`);
+      }
     }
+
+    const expectedCount = quotedItems.length - refreshSourceRows.length + refreshTargetLines.length;
+    if (rows.length !== expectedCount) mismatches.push(`line count is ${rows.length}, expected ${expectedCount}`);
+    if (String(after.Subject || '') !== newSubject) mismatches.push(`subject is "${after.Subject || ''}", expected "${newSubject}"`);
     verification.verified = true;
     verification.success = mismatches.length === 0;
     verification.line_count = rows.length;
@@ -16901,11 +17465,15 @@ async function cloneQuoteWithTerm(recordId, targetTerm, env, options = {}) {
     }
   }
 
-  // ── 6. Undo token + D1 ──
+  // ── 6. Undo token + D1. A verification failure never receives a success
+  //       URL/undo token, even though the orphan clone id remains visible. ──
   const undoToken = generateUndoToken();
+  const refreshCount = eolRefresh?.replacements?.length || 0;
+  const cloneLabel = termNum === null ? 'EOL refresh' : `${termNum}-year${eolRefresh ? ' EOL refresh' : ''}`;
   const summaryLine = verification.success
-    ? `Cloned Quote ${quote.Quote_Number || recordId} to ${termNum} year: ${swaps.length} licence line(s) swapped, ${untouched.length} line(s) carried over unchanged | [Open the clone](${cloneUrl}) | Undo token: \`${undoToken}\` (say "undo" to reverse).`
-    : `⚠️ The ${termNum}-year clone of Quote ${recordId} did NOT fully verify. ${verification.WARNING || ''}`;
+    ? `Cloned Quote ${quote.Quote_Number || recordId} as a ${cloneLabel}: ${swaps.length} licence line(s) re-termed, ${refreshCount} EOL model group(s) replaced, ${untouched.length} line(s) carried over unchanged | [Open the clone](${cloneUrl}) | Undo token: \`${undoToken}\` (say "undo" to reverse).`
+    : `⚠️ The ${cloneLabel} clone of Quote ${recordId} did NOT fully verify. ${verification.WARNING || ''}`;
+  const publicRefresh = publicCloneEolRefresh(eolRefresh);
 
   let opId = null;
   try {
@@ -16916,10 +17484,23 @@ async function cloneQuoteWithTerm(recordId, targetTerm, env, options = {}) {
       status: verification.success ? 'success' : 'error',
       durationMs: Date.now() - startedMs,
       errorMessage: verification.success ? null : (verification.WARNING || 'clone verification failed'),
-      details: { source_quote_id: recordId, target_term: termNum, swaps, untouched, clone_via: cloned.via, verification },
+      details: {
+        source_quote_id: recordId,
+        target_term: termNum,
+        swaps,
+        eol_refresh: publicRefresh,
+        untouched,
+        clone_via: cloned.via,
+        verification,
+      },
       preState: null,
       postState: { id: cloneId, Subject: newSubject, Quoted_Items: subformPayload },
-      requestPayload: { tool: 'clone_quote_with_term', source_quote_id: recordId, target_term: termNum },
+      requestPayload: {
+        tool: 'clone_quote_with_term',
+        source_quote_id: recordId,
+        target_term: termNum,
+        eol_refresh: normalizeCloneEolRefresh(options.eolRefresh),
+      },
       responsePayload: putParsed,
       undoToken: verification.success ? undoToken : null,
       userVisibleSummary: summaryLine,
@@ -16937,6 +17518,7 @@ async function cloneQuoteWithTerm(recordId, targetTerm, env, options = {}) {
     target_term: termNum,
     clone_via: cloned.via,
     swaps,
+    eol_refresh: publicRefresh,
     untouched,
     source_grand_total: moneyValue(quote.Grand_Total),
     clone_grand_total: after ? moneyValue(after.Grand_Total) : null,
@@ -16990,9 +17572,10 @@ async function quoteLineOps(recordId, moduleName, ops, env, options = {}) {
   }
 
   const setDiscounts = Array.isArray(ops?.setDiscounts) ? ops.setDiscounts : [];
+  const setQuantities = Array.isArray(ops?.setQuantities) ? ops.setQuantities : [];
   const deletes = Array.isArray(ops?.deletes) ? ops.deletes.map(String) : [];
   const reorder = Array.isArray(ops?.reorder) ? ops.reorder.map(String) : [];
-  if (setDiscounts.length === 0 && deletes.length === 0 && reorder.length === 0) {
+  if (setDiscounts.length === 0 && setQuantities.length === 0 && deletes.length === 0 && reorder.length === 0) {
     return fail('no_ops', 'No operations were supplied, so nothing was written.');
   }
 
@@ -17002,21 +17585,22 @@ async function quoteLineOps(recordId, moduleName, ops, env, options = {}) {
     return [...dupes];
   };
   const discountIds = setDiscounts.map((op) => String(op?.id || ''));
-  for (const [label, list] of [['setDiscounts', discountIds], ['deletes', deletes], ['reorder', reorder]]) {
+  const quantityIds = setQuantities.map((op) => String(op?.id || ''));
+  for (const [label, list] of [['setDiscounts', discountIds], ['setQuantities', quantityIds], ['deletes', deletes], ['reorder', reorder]]) {
     const dupes = seenDupes(list);
     if (dupes.length) {
       return fail('duplicate_op_ids', `KEEP_LIST_DUPLICATE_IDS: ${label} names the same row id more than once (${dupes.join(', ')}). Each subform id may appear at most once per op list.`);
     }
   }
-  const unknown = [...new Set([...discountIds, ...deletes, ...reorder])].filter((id) => !id || !byId.has(id));
+  const unknown = [...new Set([...discountIds, ...quantityIds, ...deletes, ...reorder])].filter((id) => !id || !byId.has(id));
   if (unknown.length) {
     return fail('unknown_ids', `KEEP_LIST_UNKNOWN_IDS: These row ids do not exist on ${moduleName} ${recordId}: ${unknown.filter(Boolean).join(', ') || '(blank)'}. Re-fetch the quote to get current subform ids.`);
   }
 
   const deleteSet = new Set(deletes);
-  const conflicts = [...discountIds, ...reorder].filter((id) => deleteSet.has(id));
+  const conflicts = [...discountIds, ...quantityIds, ...reorder].filter((id) => deleteSet.has(id));
   if (conflicts.length) {
-    return fail('delete_conflict', `These row ids are marked for delete AND for a discount or sequence change: ${[...new Set(conflicts)].join(', ')}. A row leaving the quote must carry only its delete marker.`);
+    return fail('delete_conflict', `These row ids are marked for delete AND for a quantity, discount, or sequence change: ${[...new Set(conflicts)].join(', ')}. A row leaving the quote must carry only its delete marker.`);
   }
   if (deleteSet.size >= currentItems.length) {
     return fail('empty_quoted_items', `EMPTY_QUOTED_ITEMS_REJECTED: Deleting ${deleteSet.size} of ${currentItems.length} lines would leave ${moduleName} ${recordId} with no line items. Delete the record itself instead.`);
@@ -17025,6 +17609,24 @@ async function quoteLineOps(recordId, moduleName, ops, env, options = {}) {
   const survivorIds = currentItems.map((i) => String(i.id)).filter((id) => !deleteSet.has(id));
   if (reorder.length > 0 && reorder.length !== survivorIds.length) {
     return fail('partial_reorder', `A reorder must list every surviving line. Got ${reorder.length} ids for ${survivorIds.length} surviving lines.`);
+  }
+
+  // A quantity edit always travels with the percentage the rep just reviewed.
+  // Zoho stores Discount as an absolute line-dollar amount, so changing only
+  // Quantity would otherwise leave stale economics behind. Requiring the paired
+  // discount op makes the target dollars explicit and independently verifiable.
+  const discountIdSet = new Set(discountIds);
+  const quantityById = new Map();
+  for (const op of setQuantities) {
+    const id = String(op?.id || '');
+    const qty = Number(op?.qty);
+    if (!Number.isSafeInteger(qty) || qty <= 0 || qty > 99999) {
+      return fail('invalid_quantity', `Row ${id}: quantity must be a whole number between 1 and 99999, got ${op?.qty}.`);
+    }
+    if (!discountIdSet.has(id)) {
+      return fail('quantity_requires_discount', `Row ${id}: a quantity change must include the reviewed discount percent so the absolute line discount can be recomputed safely.`);
+    }
+    quantityById.set(id, qty);
   }
 
   // ── 3. Compute the dollar discount per line. Percent is rejected up front;
@@ -17037,7 +17639,7 @@ async function quoteLineOps(recordId, moduleName, ops, env, options = {}) {
       return fail('invalid_percent', `Row ${id}: discount percent must be between 0 and 100, got ${op?.pct}.`);
     }
     const snap = byId.get(id);
-    const qty = Number(snap.Quantity) || 0;
+    const qty = quantityById.has(id) ? quantityById.get(id) : (Number(snap.Quantity) || 0);
     const listPrice = moneyValue(snap.List_Price);
     const gross = roundMoney(listPrice * qty);
     if (!(qty > 0)) return fail('invalid_line', `Row ${id}: quantity is ${snap.Quantity}, so its discount cannot be computed.`);
@@ -17076,6 +17678,7 @@ async function quoteLineOps(recordId, moduleName, ops, env, options = {}) {
       list_total: gross,
       discount,
       exact_dollars: exactDollars,
+      quantity_changed: quantityById.has(id),
       description: writeDescriptions ? qleDescriptionForPct(pct) : undefined,
     });
   }
@@ -17087,11 +17690,12 @@ async function quoteLineOps(recordId, moduleName, ops, env, options = {}) {
   // ── 5. ONE Quoted_Items array. Modify rows carry NO Product_Name, which is
   //       exactly what makes correctQuotedItemDiscounts skip them (:13398). ──
   const plannedById = new Map(planned.map((line) => [line.id, line]));
-  const modifyIds = [...new Set([...plannedById.keys(), ...sequenceById.keys()])];
+  const modifyIds = [...new Set([...plannedById.keys(), ...quantityById.keys(), ...sequenceById.keys()])];
   const subformRows = [];
   for (const id of modifyIds) {
     const row = { id };
     const line = plannedById.get(id);
+    if (quantityById.has(id)) row.Quantity = quantityById.get(id);
     if (line) {
       row.Discount = line.discount;
       if (writeDescriptions) row.Description = line.description;
@@ -17136,6 +17740,22 @@ async function quoteLineOps(recordId, moduleName, ops, env, options = {}) {
       Sequence_Number: i.Sequence_Number,
     })),
   };
+  // The write payload intentionally omits every field the user did not edit.
+  // Keep a full expected survivor snapshot so the verification re-read can
+  // prove Zoho preserved those source values instead of accepting a plausible
+  // row count after an unrelated row disappeared or changed.
+  const expectedSurvivors = currentItems
+    .filter((item) => !deleteSet.has(String(item.id)))
+    .map((item) => ({
+      id: String(item.id),
+      product_id: String(item.Product_Name?.id || ''),
+      quantity: Number(item.Quantity),
+      list_price: moneyValue(item.List_Price),
+      discount: moneyValue(item.Discount),
+      description: typeof item.Description === 'string' ? item.Description : '',
+      sequence: item.Sequence_Number === null || item.Sequence_Number === undefined
+        ? null : Number(item.Sequence_Number),
+    }));
 
   // ── 7. ONE atomic PUT. Never two PUTs for one user action: a partial write
   //       would leave the quote half edited with no clean undo. ──
@@ -17170,11 +17790,48 @@ async function quoteLineOps(recordId, moduleName, ops, env, options = {}) {
     for (const id of deleteSet) {
       if (afterById.has(id)) mismatches.push(`row ${id} was not deleted`);
     }
+    for (const expected of expectedSurvivors) {
+      const got = afterById.get(expected.id);
+      if (!got) {
+        mismatches.push(`untouched row ${expected.id} is missing`);
+        continue;
+      }
+      if (String(got.Product_Name?.id || '') !== expected.product_id) {
+        mismatches.push(`row ${expected.id}: product changed unexpectedly`);
+      }
+      if (Math.abs(moneyValue(got.List_Price) - expected.list_price) > 0.02) {
+        mismatches.push(`row ${expected.id}: list price changed unexpectedly`);
+      }
+      if (!quantityById.has(expected.id) && Number(got.Quantity) !== expected.quantity) {
+        mismatches.push(`untouched row ${expected.id}: quantity changed unexpectedly`);
+      }
+      if (!plannedById.has(expected.id)
+          && Math.abs(moneyValue(got.Discount) - expected.discount) > 0.02) {
+        mismatches.push(`untouched row ${expected.id}: discount changed unexpectedly`);
+      }
+      if (!(writeDescriptions && plannedById.has(expected.id))
+          && String(got.Description || '') !== expected.description) {
+        mismatches.push(`untouched row ${expected.id}: description changed unexpectedly`);
+      }
+      // A delete may legitimately make Zoho renumber surviving rows while
+      // preserving their relative order. With no delete and no explicit
+      // reorder, however, a sequence change is an unrelated mutation.
+      if (deleteSet.size === 0 && !sequenceById.has(expected.id)) {
+        const gotSequence = got.Sequence_Number === null || got.Sequence_Number === undefined
+          ? null : Number(got.Sequence_Number);
+        if (gotSequence !== expected.sequence) {
+          mismatches.push(`untouched row ${expected.id}: sequence changed unexpectedly`);
+        }
+      }
+    }
     for (const line of planned) {
       const got = afterById.get(line.id);
       if (!got) { mismatches.push(`${line.sku || line.id}: line missing after update`); continue; }
       if (Math.abs(moneyValue(got.Discount) - line.discount) > 0.5) {
         mismatches.push(`${line.sku || line.id}: discount did not land (wanted $${line.discount}, got $${moneyValue(got.Discount)})`);
+      }
+      if (line.quantity_changed && Number(got.Quantity) !== line.quantity) {
+        mismatches.push(`${line.sku || line.id}: quantity did not land (wanted ${line.quantity}, got ${got.Quantity})`);
       }
       if (writeDescriptions) {
         const gotDescription = typeof got.Description === 'string' ? got.Description : '';
@@ -17215,6 +17872,7 @@ async function quoteLineOps(recordId, moduleName, ops, env, options = {}) {
   const recordUrl = `https://crm.zoho.com/crm/org647122552/tab/${moduleName}/${recordId}`;
   const parts = [];
   if (planned.length) parts.push(`${planned.length} line(s) repriced`);
+  if (quantityById.size) parts.push(`${quantityById.size} quantity change(s)`);
   if (deleteSet.size) parts.push(`${deleteSet.size} line(s) deleted`);
   if (sequenceById.size) parts.push('lines reordered');
   const summaryLine = verification.success
@@ -17234,7 +17892,7 @@ async function quoteLineOps(recordId, moduleName, ops, env, options = {}) {
       status: verification.success ? 'success' : 'error',
       durationMs: Date.now() - startedMs,
       errorMessage: verification.success ? null : (verification.WARNING || 'quote line verification failed'),
-      details: { planned, deletes: [...deleteSet], reorder, scrubbed: scrub?.scrubbed || 0, verification },
+      details: { planned, quantities: [...quantityById].map(([id, qty]) => ({ id, qty })), deletes: [...deleteSet], reorder, scrubbed: scrub?.scrubbed || 0, verification },
       preState,
       postState,
       requestPayload: { tool: 'quote_line_ops', record_id: recordId, module: moduleName, ops, writeDescriptions },
@@ -17250,6 +17908,7 @@ async function quoteLineOps(recordId, moduleName, ops, env, options = {}) {
     module: moduleName,
     quote_number: record.Quote_Number || null,
     lines: planned,
+    quantities: [...quantityById].map(([id, qty]) => ({ id, qty })),
     deletes: [...deleteSet],
     reorder,
     grand_total_before: moneyValue(record.Grand_Total),
@@ -38771,7 +39430,8 @@ CRITICAL URL RULES:
 
           // ── Quote Line Editor: clone a quote onto other licence terms ──
           //
-          // in:  { recordId, terms: [3, 5], personId }
+          // in:  { recordId, terms: [3, 5], personId,
+          //        eolRefresh?: { enabled: true, replacementPath: '1g'|'10g' } }
           // out: { results: [ {target_term, success, cloned_quote_id, ...} ] }
           //
           // One clone per requested term, run SEQUENTIALLY. Each is its own
@@ -38779,30 +39439,52 @@ CRITICAL URL RULES:
           // failure on the 5-year clone leaves the 3-year one intact and says
           // so. zohoApiCall has no 429 retry, and a clone is several calls, so
           // these are never fanned out.
+          // Refresh has its own route alias so a newer extension can never send
+          // a refresh request to an older Worker that silently ignores the new
+          // option and creates an ordinary term-only clone.
+          case '/api/quote-clone-refresh':
           case '/api/quote-clone-terms': {
             const recordId = String(apiBody?.recordId || '').trim();
             if (!/^\d{10,25}$/.test(recordId)) {
               return new Response(JSON.stringify({ error: 'recordId must be a 10-25 digit string', results: [] }), { status: 400, headers: jsonHeaders });
             }
+            const eolRefresh = normalizeCloneEolRefresh(apiBody?.eolRefresh);
+            if (eolRefresh.error) {
+              return new Response(JSON.stringify({ error: eolRefresh.error, results: [] }), { status: 400, headers: jsonHeaders });
+            }
+            if (url.pathname === '/api/quote-clone-refresh' && !eolRefresh.enabled) {
+              return new Response(JSON.stringify({ error: 'The refresh endpoint requires eolRefresh.enabled=true.', results: [] }), { status: 400, headers: jsonHeaders });
+            }
             const rawTerms = Array.isArray(apiBody?.terms) ? apiBody.terms : [apiBody?.term];
-            const terms = [...new Set(rawTerms.map((t) => Number(t)).filter((t) => CLONE_TERM_ALLOWED.includes(t)))];
-            if (terms.length === 0) {
+            const suppliedTerms = rawTerms.filter((term) => term !== null && term !== undefined && String(term).trim() !== '');
+            const invalidTerms = suppliedTerms.filter((term) => !CLONE_TERM_ALLOWED.includes(Number(term)));
+            if (invalidTerms.length > 0) {
+              return new Response(JSON.stringify({ error: `Unsupported clone term(s): ${invalidTerms.join(', ')}. Use ${CLONE_TERM_ALLOWED.join(', ')}.`, results: [] }), { status: 400, headers: jsonHeaders });
+            }
+            const terms = [...new Set(suppliedTerms.map((term) => Number(term)))];
+            if (terms.length === 0 && !eolRefresh.enabled) {
               return new Response(JSON.stringify({ error: `terms must name at least one of ${CLONE_TERM_ALLOWED.join(', ')}`, results: [] }), { status: 400, headers: jsonHeaders });
             }
             if (terms.length > CLONE_TERM_ALLOWED.length) {
               return new Response(JSON.stringify({ error: 'too many terms requested', results: [] }), { status: 400, headers: jsonHeaders });
             }
             const results = [];
-            for (const term of terms.sort((a, b) => a - b)) {
+            const jobs = terms.length > 0 ? terms.sort((a, b) => a - b) : [null];
+            for (const term of jobs) {
               try {
-                results.push(await cloneQuoteWithTerm(recordId, term, env, { personId: apiBody?.personId || null }));
+                results.push(await cloneQuoteWithTerm(recordId, term, env, {
+                  personId: apiBody?.personId || null,
+                  eolRefresh,
+                }));
               } catch (err) {
-                results.push({ success: false, target_term: term, error: 'clone_threw', message: `The ${term}-year clone threw: ${err.message}` });
+                const label = term === null ? 'EOL refresh' : `${term}-year clone`;
+                results.push({ success: false, target_term: term, error: 'clone_threw', message: `The ${label} threw: ${err.message}` });
               }
             }
             return new Response(JSON.stringify({
               recordId,
               requested: terms,
+              eol_refresh: eolRefresh.enabled ? eolRefresh : null,
               succeeded: results.filter((r) => r.success).length,
               results,
             }), { headers: jsonHeaders });
@@ -38814,19 +39496,39 @@ CRITICAL URL RULES:
           // card can show exactly which licences move, to which SKUs, at what
           // price, BEFORE anything is created in Zoho. Also surfaces an
           // unmappable licence up front rather than at commit time.
+          case '/api/quote-clone-refresh-preview':
           case '/api/quote-clone-terms-preview': {
             const recordId = String(apiBody?.recordId || '').trim();
             if (!/^\d{10,25}$/.test(recordId)) {
               return new Response(JSON.stringify({ error: 'recordId must be a 10-25 digit string', previews: [] }), { status: 400, headers: jsonHeaders });
             }
-            const rawTerms = Array.isArray(apiBody?.terms) ? apiBody.terms : CLONE_TERM_ALLOWED;
-            const terms = [...new Set(rawTerms.map((t) => Number(t)).filter((t) => CLONE_TERM_ALLOWED.includes(t)))];
+            const eolRefresh = normalizeCloneEolRefresh(apiBody?.eolRefresh);
+            if (eolRefresh.error) {
+              return new Response(JSON.stringify({ error: eolRefresh.error, previews: [] }), { status: 400, headers: jsonHeaders });
+            }
+            if (url.pathname === '/api/quote-clone-refresh-preview' && !eolRefresh.enabled) {
+              return new Response(JSON.stringify({ error: 'The refresh preview endpoint requires eolRefresh.enabled=true.', previews: [] }), { status: 400, headers: jsonHeaders });
+            }
+            const hasExplicitTerms = Array.isArray(apiBody?.terms) || apiBody?.term !== undefined;
+            const rawTerms = Array.isArray(apiBody?.terms)
+              ? apiBody.terms
+              : (apiBody?.term !== undefined ? [apiBody.term] : (eolRefresh.enabled ? [] : CLONE_TERM_ALLOWED));
+            const suppliedTerms = rawTerms.filter((term) => term !== null && term !== undefined && String(term).trim() !== '');
+            const invalidTerms = suppliedTerms.filter((term) => !CLONE_TERM_ALLOWED.includes(Number(term)));
+            if (invalidTerms.length > 0) {
+              return new Response(JSON.stringify({ error: `Unsupported clone term(s): ${invalidTerms.join(', ')}. Use ${CLONE_TERM_ALLOWED.join(', ')}.`, previews: [] }), { status: 400, headers: jsonHeaders });
+            }
+            const terms = [...new Set(suppliedTerms.map((term) => Number(term)))];
+            if (hasExplicitTerms && terms.length === 0 && !eolRefresh.enabled) {
+              return new Response(JSON.stringify({ error: `terms must name at least one of ${CLONE_TERM_ALLOWED.join(', ')}`, previews: [] }), { status: 400, headers: jsonHeaders });
+            }
             try {
               const previews = [];
-              for (const term of terms.sort((a, b) => a - b)) {
-                previews.push(await previewCloneQuoteWithTerm(recordId, term, env));
+              const jobs = terms.length > 0 ? terms.sort((a, b) => a - b) : [null];
+              for (const term of jobs) {
+                previews.push(await previewCloneQuoteWithTerm(recordId, term, env, { eolRefresh }));
               }
-              return new Response(JSON.stringify({ recordId, previews }), { headers: jsonHeaders });
+              return new Response(JSON.stringify({ recordId, eol_refresh: eolRefresh.enabled ? eolRefresh : null, previews }), { headers: jsonHeaders });
             } catch (err) {
               return new Response(JSON.stringify({ recordId, previews: [], error: 'Clone preview failed: ' + err.message }), { headers: jsonHeaders });
             }

@@ -11,6 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
+import vm from 'node:vm';
 
 const require = createRequire(import.meta.url);
 const babel = require('@babel/core');
@@ -29,6 +30,7 @@ import {
   effectiveDollars,
   netUnitForRow,
   marginPctForRow,
+  normalizeQuantity,
   roundMoney,
   rowMatchesEcomm,
   fmtPct,
@@ -41,6 +43,7 @@ import {
   resequence,
   setAllSelected,
   setRowDiscount,
+  setRowQuantity,
   summarizeDiff,
   toggleRowSelected,
   totalsForRows,
@@ -106,6 +109,16 @@ test('percent clamps to 0..100 with one decimal and survives blank input', () =>
   assert.equal(clampPct(null), null);
 });
 
+test('quantity normalization accepts only positive safe whole numbers in the editor range', () => {
+  assert.equal(normalizeQuantity(1), 1);
+  assert.equal(normalizeQuantity('12'), 12);
+  assert.equal(normalizeQuantity('00012'), 12);
+  assert.equal(normalizeQuantity(99999), 99999);
+  for (const invalid of ['', null, undefined, 0, -1, 1.5, '1.5', '1e3', 'abc', 100000, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(normalizeQuantity(invalid), null, String(invalid));
+  }
+});
+
 test('descriptionForPct is the exact copy Chris chose, and never says margin', () => {
   assert.equal(descriptionForPct(0), '');
   assert.equal(descriptionForPct(null), '');
@@ -163,6 +176,116 @@ test('an untouched hand-written description is left alone, but re-applying its o
   ]);
 });
 
+test('description writing can be disabled without suppressing discount or quantity edits', () => {
+  const original = rowsOf();
+  const discounted = applyBulkDiscount(original, 25);
+  const diff = diffAgainstOriginal(original, discounted, { writeDescriptions: false });
+  assert.equal(diff.setDiscounts.length, 5);
+  assert.deepEqual(diff.descriptionChanges, []);
+
+  const built = buildOpsPayload(original, discounted, {
+    recordId: API.quoteId,
+    writeDescriptions: false,
+  });
+  assert.equal(built.ok, true);
+  assert.equal(built.payload.writeDescriptions, false);
+  assert.deepEqual(built.diff.descriptionChanges, []);
+  assert.deepEqual(discounted.map((row) => row.description), original.map((row) => row.description),
+    'the editor never mutates an existing description locally');
+
+  // Re-applying the same percent is a description-only operation when enabled.
+  // With the checkbox off, it is correctly a complete no-op and preserves both
+  // the hand-written note and every blank description.
+  const samePercent = setRowDiscount(original, 'r2', 15);
+  assert.equal(diffAgainstOriginal(original, samePercent).hasChanges, true);
+  assert.equal(diffAgainstOriginal(original, samePercent, { writeDescriptions: false }).hasChanges, false);
+  assert.equal(buildOpsPayload(original, samePercent, {
+    recordId: API.quoteId,
+    writeDescriptions: false,
+  }).ok, false);
+});
+
+test('a quantity edit is normalized, recalculates dollars, and emits quantity plus discount atomically', () => {
+  const original = rowsOf();
+  const rows = setRowQuantity(original, 'r2', '12');
+  const row = rows.find((candidate) => candidate.id === 'r2');
+  assert.equal(original.find((candidate) => candidate.id === 'r2').qty, 10, 'the original snapshot is immutable');
+  assert.equal(row.qty, 12);
+  assert.equal(row.discountPct, 15, 'the reviewed discount percent is preserved');
+  assert.equal(row.discountDollars, null, 'stale exact dollars are dropped before recalculation');
+  assert.equal(effectiveDollars(row), 810, '450 x 12 x 15%');
+  assert.equal(netForRow(row), 4590);
+  assert.equal(row.dirty, true);
+
+  const diff = diffAgainstOriginal(original, rows);
+  assert.deepEqual(diff.setQuantities, [{ id: 'r2', qty: 12 }]);
+  assert.deepEqual(diff.setDiscounts, [{ id: 'r2', pct: 15 }]);
+  assert.equal(summarizeDiff(diff), '1 quantity change, discount recalculated at 15%');
+
+  const built = buildOpsPayload(original, rows, { recordId: API.quoteId });
+  assert.deepEqual(built.payload.ops.setQuantities, [{ id: 'r2', qty: 12 }]);
+  assert.deepEqual(built.payload.ops.setDiscounts, [{ id: 'r2', pct: 15 }]);
+  assert.equal(built.payload.writeDescriptions, true);
+
+  const preserving = buildOpsPayload(original, rows, {
+    recordId: API.quoteId,
+    writeDescriptions: false,
+  });
+  assert.equal(preserving.ok, true);
+  assert.deepEqual(preserving.diff.descriptionChanges, []);
+  assert.deepEqual(preserving.payload.ops.setQuantities, [{ id: 'r2', qty: 12 }]);
+  assert.deepEqual(preserving.payload.ops.setDiscounts, [{ id: 'r2', pct: 15 }]);
+});
+
+test('a quantity edit rejects unsafe values and invalidates stale pricing badges', () => {
+  const original = rowsOf();
+  for (const invalid of ['', 0, -1, 1.5, '1e3', 100000, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.deepEqual(setRowQuantity(original, 'r2', invalid), original, String(invalid));
+  }
+  assert.deepEqual(setRowQuantity(original, 'r2', 10), original, 're-entering the same quantity is a no-op');
+
+  const priced = original.map((row) => (row.id === 'r2' ? {
+    ...row,
+    ecomm: { price: 382.5 },
+    ecommError: 'old ecomm warning',
+    cost: { distiTotal: 2000 },
+    costError: 'old cost warning',
+  } : row));
+  const changed = setRowQuantity(priced, 'r2', 11).find((row) => row.id === 'r2');
+  assert.equal(changed.ecomm, null);
+  assert.equal(changed.ecommError, '');
+  assert.equal(changed.cost, null);
+  assert.equal(changed.costError, '');
+});
+
+test('a quantity edit followed by exact pricing carries fresh dollars against the new quantity', () => {
+  const original = rowsOf();
+  const resized = setRowQuantity(original, 'r3', 3);
+  const ecommRows = applyEcommPricing(resized, [{
+    id: 'r3', listPrice: 2195, ecommPrice: 1920.63, source: 'live_zoho_wooproducts', error: '',
+  }]);
+  const ecommRow = ecommRows.find((row) => row.id === 'r3');
+  assert.equal(ecommRow.discountDollars, 823.11, '(2195 - 1920.63) x the new quantity of 3');
+  assert.equal(ecommRow.discountPct, 12.5);
+  assert.equal(netUnitForRow(ecommRow), 1920.63);
+
+  const ecommPayload = buildOpsPayload(original, ecommRows, { recordId: API.quoteId }).payload;
+  assert.deepEqual(ecommPayload.ops.setQuantities, [{ id: 'r3', qty: 3 }]);
+  assert.deepEqual(ecommPayload.ops.setDiscounts, [{ id: 'r3', pct: 12.5, dollars: 823.11 }],
+    'fresh exact dollars must not be dropped merely because quantity also moved');
+  assert.equal(dollarsForPct(2195, 3, 12.5), 823.13,
+    'the rounded percent would miss storefront parity by two cents');
+
+  // Margin pricing uses the same exact-dollar seam and must survive the same
+  // quantity-plus-discount atomic payload.
+  const marginRows = applyMarginPricing(resized, [{ id: 'r3', distiTotal: 5000, error: '' }], 10);
+  const marginRow = marginRows.find((row) => row.id === 'r3');
+  assert.equal(marginRow.discountDollars, 1029.44);
+  const marginPayload = buildOpsPayload(original, marginRows, { recordId: API.quoteId }).payload;
+  assert.deepEqual(marginPayload.ops.setQuantities, [{ id: 'r3', qty: 3 }]);
+  assert.deepEqual(marginPayload.ops.setDiscounts, [{ id: 'r3', pct: 15.63, dollars: 1029.44 }]);
+});
+
 test('a bulk 25% fills every surviving row and rewrites every description', () => {
   const original = rowsOf();
   const rows = applyBulkDiscount(original, 25);
@@ -192,6 +315,7 @@ test('a row set back to 0% clears its description instead of writing 0% Discount
 test('a deleted row emits only a delete, never a discount and never a sequence', () => {
   const original = rowsOf();
   let rows = applyBulkDiscount(original, 25);
+  rows = setRowQuantity(rows, 'r4', 3);
   rows = toggleRowSelected(rows, 'r4');
   rows = markSelectedForDelete(rows);
   rows = resequence(rows);
@@ -199,6 +323,7 @@ test('a deleted row emits only a delete, never a discount and never a sequence',
   const diff = diffAgainstOriginal(original, rows);
   assert.deepEqual(diff.deletes, ['r4']);
   assert.equal(diff.setDiscounts.some((op) => op.id === 'r4'), false);
+  assert.equal(diff.setQuantities.some((op) => op.id === 'r4'), false);
   assert.equal(diff.reorder.includes('r4'), false);
   assert.equal(rows.find((row) => row.id === 'r4').sequence, null);
   // Surviving rows renumber densely; that alone is not a reorder.
@@ -209,6 +334,7 @@ test('a deleted row emits only a delete, never a discount and never a sequence',
   assert.equal(built.ok, true);
   assert.equal(built.payload.ops.deletes.length, 1);
   assert.equal(built.payload.ops.setDiscounts.some((op) => op.id === 'r4'), false);
+  assert.equal(built.payload.ops.setQuantities.some((op) => op.id === 'r4'), false);
   assert.equal(JSON.stringify(built.payload.ops.reorder), '[]');
   // A bulk discount applied BEFORE the delete must not leak an op for that row.
   assert.equal(applyBulkDiscount(rows, 40).find((row) => row.id === 'r4').discountPct, 25);
@@ -233,6 +359,9 @@ test('validateRows fails closed on a duplicate id, a missing id, and a bad perce
   assert.equal(validateRows([...original, { ...original[0] }]).errors[0].code, 'duplicate_id');
   assert.equal(validateRows([{ ...original[0], id: '' }]).errors[0].code, 'missing_id');
   assert.equal(validateRows([{ ...original[0], discountPct: 'abc' }]).errors[0].code, 'invalid_pct');
+  assert.equal(validateRows([{ ...original[0], qty: 0 }]).errors[0].code, 'invalid_quantity');
+  assert.equal(validateRows([{ ...original[0], qty: 1.5 }]).errors[0].code, 'invalid_quantity');
+  assert.equal(validateRows([{ ...original[0], qty: Number.MAX_SAFE_INTEGER + 1 }]).errors[0].code, 'invalid_quantity');
   assert.equal(validateRows([]).errors[0].code, 'no_rows');
 });
 
@@ -287,6 +416,7 @@ test('the full mixed commit carries discounts, deletes and reorder in one payloa
   assert.equal(built.payload.personId, 'chris');
   assert.equal(built.payload.writeDescriptions, true);
   assert.deepEqual(built.payload.ops.deletes.sort(), ['r4', 'r5']);
+  assert.deepEqual(built.payload.ops.setQuantities, []);
   assert.deepEqual(
     built.payload.ops.setDiscounts.map((op) => [op.id, op.pct]).sort(),
     [['r1', 25], ['r2', 25], ['r3', 12.5]],
@@ -674,6 +804,37 @@ test('margin and ecomm are mutually exclusive, and a typed percent clears both',
 
 const EDITOR_PATH = new URL('./src/sidebar/components/QuoteLineEditor.jsx', import.meta.url);
 
+function loadEditorHelperExports() {
+  const source = fs.readFileSync(EDITOR_PATH, 'utf8');
+  const transformed = babel.transformSync(source, {
+    filename: 'QuoteLineEditor.jsx',
+    presets: [
+      [presetEnv, { targets: { node: 'current' }, modules: 'commonjs' }],
+      [presetReact, { runtime: 'automatic' }],
+    ],
+    babelrc: false,
+    configFile: false,
+  });
+  const moduleRecord = { exports: {} };
+  const colors = new Proxy({}, { get: () => '#000' });
+  const localRequire = (specifier) => {
+    if (specifier === 'react') return {};
+    if (specifier === 'react/jsx-runtime') {
+      return { Fragment: 'fragment', jsx: () => null, jsxs: () => null };
+    }
+    if (specifier.includes('/lib/constants')) return { COLORS: colors };
+    if (specifier.includes('quote-line-editor-core')) return {};
+    throw new Error(`Unexpected QuoteLineEditor test import: ${specifier}`);
+  };
+  vm.runInNewContext(transformed.code, {
+    module: moduleRecord,
+    exports: moduleRecord.exports,
+    require: localRequire,
+    console,
+  });
+  return moduleRecord.exports;
+}
+
 test('QuoteLineEditor gates the commit on diff, validation and busy', () => {
   const source = fs.readFileSync(EDITOR_PATH, 'utf8');
   assert.match(source, /const commitDisabled = busy \|\| ecommBusy \|\| marginBusy \|\| cloneBusy \|\| !diff\.hasChanges \|\| !validation\.ok;/);
@@ -685,6 +846,19 @@ test('QuoteLineEditor gates the commit on diff, validation and busy', () => {
   assert.doesNotMatch(source, /[\u2014]/);
   // Discount maths lives in the core, never inline in the JSX.
   assert.doesNotMatch(source, /listPrice\s*\*\s*qty\s*\*/);
+});
+
+test('QuoteLineEditor exposes direct quantity and description controls through the tested core', () => {
+  const source = fs.readFileSync(EDITOR_PATH, 'utf8');
+  assert.match(source, /aria-label={`Quantity for line \$\{index \+ 1\}`}/);
+  assert.match(source, /min="1"[\s\S]{0,80}max="99999"[\s\S]{0,80}step="1"/);
+  assert.match(source, /setRowQuantity\(rows, row\.id, event\.target\.value\)/);
+  assert.match(source, /aria-label="Include discount percentage in line descriptions"/);
+  assert.match(source, /checked=\{writeDescriptions\}/);
+  assert.match(source, /diffAgainstOriginal\(original, rows, \{ writeDescriptions \}\)/);
+  assert.match(source, /buildOpsPayload\(original, rows, \{[\s\S]{0,180}writeDescriptions/);
+  assert.match(source, /Existing line descriptions, including blanks, will be preserved\./);
+  assert.match(source, /result\?\.quantities\?\.length/, 'the verified write summary must report quantity changes');
 });
 
 test('the editor JSX parses under the extension Babel config', () => {
@@ -723,12 +897,77 @@ test('order-URL verification accepts a bare code against an -HW committed row', 
   assert.match(flow, /sku\.endsWith\('-HW'\)/, 'the -HW equivalence must still exist');
 });
 
-test('the clone-with-terms card is gated and never auto-retried', () => {
+test('clone refresh request logic is narrow and never increases selected-term clone count', () => {
+  const {
+    cloneEolRefreshRequest,
+    requestedCloneCount,
+    refreshClonePreviewReady,
+    cloneEolRefreshDetails,
+    eolReplacementDescription,
+  } = loadEditorHelperExports();
+
+  const off = cloneEolRefreshRequest(false, '10G');
+  assert.equal(off.enabled, false);
+  assert.equal(off.replacementPath, null);
+  const oneG = cloneEolRefreshRequest(true, '1G');
+  assert.equal(oneG.enabled, true);
+  assert.equal(oneG.replacementPath, '1g');
+  assert.equal(cloneEolRefreshRequest(true, 'unexpected').replacementPath, null);
+
+  assert.equal(requestedCloneCount([], false), 0);
+  assert.equal(requestedCloneCount([], true), 1, 'refresh-only creates one clone');
+  assert.equal(requestedCloneCount([1, 3, 5], true), 3, 'refresh transforms selected clones instead of adding one');
+  assert.equal(requestedCloneCount([3, 3, 99], true), 1, 'terms are bounded and deduplicated');
+
+  const completePreview = {
+    available: true,
+    eol_refresh: { enabled: true, complete: true, replacement_path: '1g' },
+  };
+  assert.equal(refreshClonePreviewReady([completePreview], [], true, '1g'), true);
+  assert.equal(refreshClonePreviewReady([{ available: true }], [], true, ''), false,
+    'an old term preview that omits eol_refresh must never unlock a refresh write');
+  assert.equal(refreshClonePreviewReady([{ ...completePreview, eol_refresh: { enabled: true, complete: false } }], [], true, ''), false);
+  assert.equal(refreshClonePreviewReady([completePreview], [1, 3], true, '1g'), false, 'every requested clone needs a preview');
+  assert.equal(refreshClonePreviewReady([completePreview], [], true, '10g'), false, 'the selected path must match');
+
+  const entry = {
+    warnings: ['Check tier'],
+    alternatives: [{ path: '1g' }, { path: '10g' }],
+    eol_refresh: {
+      enabled: true,
+      replacements: [{ source_model: 'MS225-48FP', target_lines: [] }],
+      unresolved: [{ id: 'row-1', sku: 'MX100', quantity: 1, description: 'generic licence cannot bind a model' }],
+      review_warnings: ['Check tier', 'License review required'],
+    },
+  };
+  const details = cloneEolRefreshDetails(entry);
+  assert.equal(details.replacements.length, 1);
+  assert.deepEqual(Array.from(details.warnings), ['Check tier', 'License review required']);
+  assert.deepEqual(Array.from(details.unresolved), ['MX100']);
+  assert.deepEqual(Array.from(details.alternatives), ['1g', '10g']);
+  assert.equal(eolReplacementDescription(entry.eol_refresh.replacements[0], {}), 'Replaces EOL MS225-48FP');
+  assert.equal(eolReplacementDescription({ description: 'Replaces EOL MX100' }, {}), 'Replaces EOL MX100');
+});
+
+test('the clone term and EOL refresh card is gated and never auto-retried', () => {
   const source = fs.readFileSync(EDITOR_PATH, 'utf8');
   // Terms offered, matching the worker's CLONE_TERM_ALLOWED.
   assert.match(source, /const CLONE_TERMS = \[1, 3, 5, 7, 10\]/);
-  // The clone button cannot fire with nothing ticked, or while busy.
-  assert.match(source, /disabled=\{busy \|\| cloneBusy \|\| cloneTerms\.length === 0\}/);
+  // Refresh is opt-in and supports a refresh-only request.
+  assert.match(source, /const \[cloneEolRefresh, setCloneEolRefresh\] = useState\(false\)/);
+  assert.match(source, /const cloneRequestReady = cloneCount > 0/);
+  assert.match(source, /const cloneWriteReady = cloneRequestReady && \(!cloneEolRefresh \|\| refreshClonePreviewReady\(/);
+  assert.match(source, /if \(!onCloneTerms \|\| !cloneWriteReady\) return/);
+  assert.match(source, /disabled=\{busy \|\| cloneBusy \|\| !cloneRequestReady\}/);
+  assert.match(source, /disabled=\{busy \|\| cloneBusy \|\| !cloneWriteReady\}/);
+  assert.match(source, /aria-label="Include end-of-life equipment refresh"/);
+  assert.match(source, /aria-label="EOL replacement path preference"/);
+  assert.match(source, /<option value="1g">Prefer 1G replacement<\/option>/);
+  assert.match(source, /<option value="10g">Prefer 10G replacement<\/option>/);
+  assert.match(source, /cloneEolRefreshRequest\(cloneEolRefresh, cloneReplacementPath\)/);
+  assert.match(source, /Replacement line descriptions always name the retired model as "Replaces EOL \[model\]"/);
+  assert.match(source, /Refresh preview is incomplete or unsupported\. No quote can be created\./);
+  assert.match(source, /Preview this exact refresh first\. Clone unlocks only after every refresh plan is available and complete\./);
   // A clone creates records, so it must never be retried automatically: a
   // retry after a partial failure would leave duplicate quotes behind.
   const runClones = source.slice(source.indexOf('async function runClones()'));
@@ -737,22 +976,39 @@ test('the clone-with-terms card is gated and never auto-retried', () => {
   assert.match(source, /The clone is made from what Zoho holds now, not your uncommitted edits/);
   // Committing is blocked while a clone is in flight.
   assert.match(source, /const commitDisabled = busy \|\| ecommBusy \|\| marginBusy \|\| cloneBusy/);
+  // Preview and results expose provenance plus every review gate.
+  assert.match(source, /Description: "\{eolReplacementDescription\(replacement, line\)\}"/);
+  assert.match(source, /Review warning: \{warning\}/);
+  assert.match(source, /Unresolved EOL lines:/);
+  assert.match(source, /Available replacement paths:/);
+  assert.match(source, /License review required for this replacement/);
 });
 
 test('background, api-client and constants wire the clone endpoints', () => {
   const constants = fs.readFileSync(new URL('./src/lib/constants.js', import.meta.url), 'utf8');
   const client = fs.readFileSync(new URL('./src/background/api-client.js', import.meta.url), 'utf8');
   const background = fs.readFileSync(new URL('./src/background/index.js', import.meta.url), 'utf8');
+  const app = fs.readFileSync(new URL('./src/sidebar/App.jsx', import.meta.url), 'utf8');
 
   assert.match(constants, /PREVIEW_QUOTE_CLONE_TERMS: 'PREVIEW_QUOTE_CLONE_TERMS'/);
   assert.match(constants, /CLONE_QUOTE_TERMS: 'CLONE_QUOTE_TERMS'/);
-  assert.match(client, /apiCall\('\/api\/quote-clone-terms-preview'/);
-  assert.match(client, /apiCall\('\/api\/quote-clone-terms'/);
+  assert.match(client, /eolRefresh\?\.enabled === true[\s\S]{0,100}'\/api\/quote-clone-refresh-preview'[\s\S]{0,100}'\/api\/quote-clone-terms-preview'/);
+  assert.match(client, /payload\?\.eolRefresh\?\.enabled === true[\s\S]{0,100}'\/api\/quote-clone-refresh'[\s\S]{0,100}'\/api\/quote-clone-terms'/);
   // 90s: each term is a clone, a re-read, an atomic PUT and a verify, run
   // sequentially.
-  assert.match(client, /\/api\/quote-clone-terms'[\s\S]{0,120}timeout: 90000/);
+  assert.match(client, /apiCall\(route, payload, \{ timeout: 90000 \}\)/);
   assert.match(background, /\[MSG\.PREVIEW_QUOTE_CLONE_TERMS\]/);
   assert.match(background, /\[MSG\.CLONE_QUOTE_TERMS\]/);
+  assert.match(app, /\(id, terms, eolRefresh\) => sendToBackground\(MSG\.PREVIEW_QUOTE_CLONE_TERMS, \{/);
+  assert.match(app, /recordId: id,[\s\S]{0,80}terms,[\s\S]{0,80}eolRefresh/);
+  assert.match(background, /\[MSG\.PREVIEW_QUOTE_CLONE_TERMS\]: async \(\{ recordId, terms, eolRefresh \}\)/);
+  assert.match(background, /previewQuoteCloneTerms\(id, Array\.isArray\(terms\) \? terms : undefined, eolRefresh\)/);
+  assert.match(client, /previewQuoteCloneTerms\(recordId, terms, eolRefresh\)/);
+  assert.match(client, /apiCall\(route, \{ recordId, terms, eolRefresh \}, \{ timeout: 45000 \}\)/);
+  // Write already forwards the complete payload; eolRefresh must not be picked
+  // apart or lost before the Worker validates it.
+  assert.match(background, /return api\.cloneQuoteTerms\(payload\)/);
+  assert.match(client, /apiCall\(route, payload/);
 
   const cloneFn = client.slice(client.indexOf('export async function cloneQuoteTerms'));
   assert.doesNotMatch(cloneFn.slice(0, cloneFn.indexOf('\n}')), /retry|for \(|while \(/);
