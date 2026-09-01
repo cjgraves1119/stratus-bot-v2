@@ -17394,9 +17394,37 @@ async function cloneQuoteWithTerm(recordId, targetTerm, env, options = {}) {
       if (String(got.Description || '') !== expected.description) {
         mismatches.push(`untouched row ${expected.id}: description changed`);
       }
-      const gotSequence = got.Sequence_Number === null || got.Sequence_Number === undefined
-        ? null : Number(got.Sequence_Number);
-      if (gotSequence !== expected.sequence) mismatches.push(`untouched row ${expected.id}: sequence changed`);
+    }
+    // Zoho compacts Sequence_Number values after source rows are replaced by
+    // multiple current-model rows. Absolute sequence values therefore change
+    // even when every untouched row stays in the same relative position. Keep
+    // the meaningful safety check: untouched rows must retain their order.
+    const preservedIds = new Set(preservedCloneRows.map((row) => row.id));
+    const orderedIds = (items, sequenceOf) => items
+      .map((item, index) => ({
+        id: String(item.id),
+        index,
+        sequence: sequenceOf(item),
+      }))
+      .sort((a, b) => {
+        const aHasSequence = Number.isFinite(a.sequence);
+        const bHasSequence = Number.isFinite(b.sequence);
+        if (aHasSequence && bHasSequence && a.sequence !== b.sequence) return a.sequence - b.sequence;
+        if (aHasSequence !== bHasSequence) return aHasSequence ? -1 : 1;
+        return a.index - b.index;
+      })
+      .map((item) => item.id);
+    const expectedUntouchedOrder = orderedIds(
+      preservedCloneRows,
+      (row) => row.sequence,
+    );
+    const actualUntouchedOrder = orderedIds(
+      rows.filter((row) => preservedIds.has(String(row.id))),
+      (row) => row.Sequence_Number === null || row.Sequence_Number === undefined
+        ? null : Number(row.Sequence_Number),
+    );
+    if (expectedUntouchedOrder.join('\u0000') !== actualUntouchedOrder.join('\u0000')) {
+      mismatches.push('untouched rows changed relative order');
     }
     if (termNum !== null) {
       for (const row of rows) {

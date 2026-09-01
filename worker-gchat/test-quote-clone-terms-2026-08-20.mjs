@@ -729,6 +729,36 @@ test('an untouched row cannot disappear behind a plausible final line count', as
   assert.match(result.verification?.WARNING || '', /untouched row c3 is missing/i);
 });
 
+test('Zoho sequence compaction is accepted when untouched rows keep relative order', async () => {
+  const calls = stubZoho({
+    mutate: (rows) => rows.map((row) => {
+      const compactedSequence = { c1: 1, c3: 2, c5: 3 }[row.id];
+      return compactedSequence ? { ...row, Sequence_Number: compactedSequence } : row;
+    }),
+  });
+  const result = await w.cloneQuoteWithTerm(SRC_ID, 3, ENV, {});
+
+  assert.equal(calls.put, 1);
+  assert.equal(result.success, true, result.message);
+  assert.equal(result.verification?.success, true);
+});
+
+test('an untouched-row reorder still fails verification', async () => {
+  const calls = stubZoho({
+    mutate: (rows) => rows.map((row) => {
+      const reorderedSequence = { c1: 3, c3: 2, c5: 1 }[row.id];
+      return reorderedSequence ? { ...row, Sequence_Number: reorderedSequence } : row;
+    }),
+  });
+  const result = await w.cloneQuoteWithTerm(SRC_ID, 3, ENV, {});
+
+  assert.equal(calls.put, 1);
+  assert.equal(result.success, false);
+  assert.equal(result._undo_token, undefined);
+  assert.equal(result._record_url, undefined);
+  assert.match(result.verification?.WARNING || '', /untouched rows changed relative order/i);
+});
+
 test('a replacement with the wrong list price fails verification and suppresses undo', async () => {
   const calls = stubZoho({
     items: eolRefreshItems(),
