@@ -53,6 +53,8 @@ test('visible Create Quote opens a manual builder; Gmail population is separate 
   assert.match(content, /function findVisibleExpandAllControl\(\)/);
   assert.match(content, /expandAll\.click\(\)/);
   assert.match(content, /fullThreadExpanded: !findVisibleExpandAllControl\(\)/);
+  assert.match(content, /const hasVisibleThreadDom = !!\(subjectEl && renderedMessageBody\)/);
+  assert.match(content, /if \(!isThreadView && !hasVisibleThreadDom\) return null/);
   assert.match(intake, /validateGmailQuoteContext\(fresh/);
   assert.match(intake, /expectedThreadPermId: emailContext\?\.threadPermId/);
   assert.match(intake, /emailQuoteStartRef\.current/);

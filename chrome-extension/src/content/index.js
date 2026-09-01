@@ -385,14 +385,22 @@ function extractEmailData(options = {}) {
   // Strategy 1: URL-based detection
   const hash = window.location.hash;
   // Gmail thread hashes: #inbox/FMfcg..., #sent/FMfcg..., #label/FMfcg..., etc.
-  const isThreadView = hash && /^#[a-zA-Z0-9_/]+\/[A-Za-z0-9]+/.test(hash);
-  if (!hash || (!isThreadView && !hash.includes('/'))) return null;
+  const isThreadView = !!(hash && /^#[a-zA-Z0-9_/]+\/[A-Za-z0-9]+/.test(hash));
 
   // Strategy 2: Subject line detection (try multiple selectors)
   const subjectEl = document.querySelector('h2.hP')
     || document.querySelector('[data-thread-perm-id] h2')
     || document.querySelector('.ha h2')
     || document.querySelector('[role="main"] h2');
+  const renderedMessageBody = document.querySelector('.a3s.aiL')
+    || document.querySelector('.ii.gt div')
+    || document.querySelector('[data-message-id] .a3s');
+  // Comet's current Gmail surface can keep the address at /mail/u/0/ while a
+  // conversation is visibly open, leaving location.hash empty. In that case,
+  // require both independent DOM signals before treating the page as a thread;
+  // a list/search page with only a heading must continue to fail closed.
+  const hasVisibleThreadDom = !!(subjectEl && renderedMessageBody);
+  if (!isThreadView && !hasVisibleThreadDom) return null;
   if (!subjectEl) {
     console.log('[Stratus AI] No subject element found. Selectors tried: h2.hP, [data-thread-perm-id] h2, .ha h2, [role="main"] h2');
     return null;
@@ -412,9 +420,7 @@ function extractEmailData(options = {}) {
   }
 
   // Get email body (try multiple selectors)
-  const bodyEl = document.querySelector('.a3s.aiL')
-    || document.querySelector('.ii.gt div')
-    || document.querySelector('[data-message-id] .a3s');
+  const bodyEl = renderedMessageBody;
   const fullThreadBody = options.includeFullThread ? extractVisibleThreadBody() : '';
   const messageContexts = extractVisibleMessageContexts();
   const body = options.includeFullThread
