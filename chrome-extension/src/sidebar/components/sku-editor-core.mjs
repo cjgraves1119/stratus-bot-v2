@@ -144,9 +144,31 @@ export function normalizeSkuEditorRows(rows) {
     // A paired and a standalone copy of the same catalogue license have
     // different commercial meaning. Keep them as distinct editable rows.
     const key = `${sku}\u0000${tier}\u0000${licenseIntent}`;
+    const rawAvailability = String(row?.availability || '').trim().toLowerCase();
+    const availability = ['ecomm', 'zoho_only'].includes(rawAvailability) ? rawAvailability : 'unknown';
     const existing = grouped.get(key);
-    if (existing) existing.qty += qty;
-    else grouped.set(key, { sku, qty, ...(tier ? { tier } : {}), ...(licenseIntent ? { licenseIntent } : {}) });
+    if (existing) {
+      existing.qty += qty;
+      // Conservative merge: one proof that a duplicate SKU is absent from the
+      // storefront routes the combined row through Zoho. Conflicting or absent
+      // proofs remain unknown and can never claim eCommerce availability.
+      const existingAvailability = existing.availability || 'unknown';
+      if (existingAvailability !== availability) {
+        const mergedAvailability = existingAvailability === 'zoho_only' || availability === 'zoho_only'
+          ? 'zoho_only'
+          : 'unknown';
+        if (mergedAvailability === 'unknown') delete existing.availability;
+        else existing.availability = mergedAvailability;
+      }
+    } else {
+      grouped.set(key, {
+        sku,
+        qty,
+        ...(tier ? { tier } : {}),
+        ...(licenseIntent ? { licenseIntent } : {}),
+        ...(availability !== 'unknown' ? { availability } : {}),
+      });
+    }
 
     if (!sku.startsWith('LIC-')) {
       if (!intentsBySku.has(sku)) intentsBySku.set(sku, new Set());

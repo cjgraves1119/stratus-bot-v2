@@ -40,14 +40,20 @@ check('chat email-quote replies never auto-open a one-shot plan', () => {
   assert.ok(!/startOneshotFromUrl|replyOrderUrls|ONESHOT_PLAN/.test(seg), 'chat reply must not create a one-shot card proactively');
 });
 
-check('only the explicit quote-card button authorizes the first one-shot plan', () => {
+check('only explicit quote-card or Zoho-only review buttons authorize the first one-shot plan', () => {
   assert.ok(QUOTE.includes('Create Zoho CRM quote from selected'), 'explicit consent button is missing');
   assert.ok(/onClick=\{\(\) => hasExplicitTermSelection && onSendToZoho\(result, validSelectedIndexes\)\}/.test(QUOTE), 'Zoho review must require a selected quote option and a separate button click');
   const starts = SRC.match(/startOneshotFromUrl\(/g) || [];
-  assert.strictEqual(starts.length, 2, `expected one declaration + one explicit call, found ${starts.length}`);
+  assert.strictEqual(starts.length, 3, `expected one declaration + two explicit button calls, found ${starts.length}`);
   const seg = SRC.slice(SRC.indexOf('async function handleSendQuoteToZoho'), SRC.indexOf('async function replanOneshot'));
   assert.ok(/rebaseQuoteOptionIndexes\([\s\S]*indexedQuoteOptions\.map\(\(option\) => option\.sourceIndex\)/.test(seg), 'Zoho handoff must preserve the original reviewed index after safe-option filtering');
   assert.ok(/return startOneshotFromUrl\(orderUrl, \{[\s\S]*selectedQuoteOptionIndex: normalizedSelectedIndex/.test(seg));
+  const zohoOnly = SRC.slice(SRC.indexOf('async function startZohoOnlyManualQuote'), SRC.indexOf('async function replanOneshot'));
+  assert.ok(/msg\?\.manualQuoteBuilder/.test(zohoOnly), 'Zoho-only entry must belong to an explicit manual card');
+  assert.ok(/zohoListPriceSkus/.test(zohoOnly), 'Zoho-only entry must carry its explicit list-price SKU allowlist');
+  assert.ok(/startOneshotFromUrl\('', \{[\s\S]*directSkus: prepared\.rows/.test(zohoOnly), 'Zoho-only review must use the same guarded planner');
+  assert.ok(/directSkus\.map\(\(line\) => \(\{[\s\S]*line\?\.tier/.test(SRC), 'direct Zoho review must preserve each selected row tier');
+  assert.ok(/startZohoOnlyManualQuote\(msg, rows\)/.test(SRC), 'the manual card button must be the only Zoho-only trigger');
   assert.ok(!/findIndex\(\(option\) => option\.url ===/.test(seg), 'Zoho handoff must never collapse alternatives by URL equality');
   assert.ok(/consentSource: 'quote-card-button'/.test(seg), 'explicit consent provenance must be stored on the card');
   assert.ok(/msg\.consentSource !== 'quote-card-button'/.test(SRC), 'legacy auto/intake cards must render inert');

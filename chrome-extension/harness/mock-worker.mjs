@@ -47,7 +47,7 @@ const COMPANION = {
   'C9300-24P-M': (t) => `LIC-C9300-24E-${t}Y`,
   MX75: (t) => `LIC-MX75-SEC-${t}Y`,
   MX85: (t) => `LIC-MX85-SEC-${t}Y`,
-  MX67C: (t) => `LIC-MX67C-ENT-${t}YR`,
+  MX67C: (t) => `LIC-MX67C-SEC-${t}YR`,
   MX68CW: (t) => `LIC-MX68CW-SEC-${t}YR`,
   CW9172H: (t) => `LIC-ENT-${t}YR`,
 };
@@ -167,7 +167,7 @@ export const PRODUCT_POOL = [
   ...Object.values(HARDWARE_FORM),
   'C9300-48P-M', 'C9300-24P-M',
   'LIC-ENT-1YR', 'LIC-ENT-3YR', 'LIC-ENT-5YR',
-  'LIC-MX67C-ENT-1YR', 'LIC-MX67C-ENT-3YR', 'LIC-MX67C-ENT-5YR',
+  'LIC-MX67C-SEC-1YR', 'LIC-MX67C-SEC-3YR', 'LIC-MX67C-SEC-5YR',
   'LIC-MS130-24-3Y', 'LIC-C9300-48E-3Y',
 ];
 

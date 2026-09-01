@@ -368,6 +368,15 @@ global.fetch = async (url, options = {}) => {
     const calls = [];
     global.fetch = async (url, options = {}) => {
       calls.push({ url: String(url), method: options.method || 'GET', body: options.body });
+      if (String(url).startsWith('https://www.zohoapis.com/crm/v8/WooProducts/search?')) {
+        return new Response(JSON.stringify({
+          data: Array.from({ length: 5 }, (_, index) => ({
+            WooProduct_Code: `C9300-LIVE-${String(index * 2).padStart(2, '0')}`,
+            Stratus_Price: 900,
+            Inactive: false,
+          })),
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
       assert.ok(String(url).startsWith('https://www.zohoapis.com/crm/v8/Products/search?'));
       const active = Array.from({ length: 12 }, (_, index) => ({
         id: String(2570562000400000000n + BigInt(index)),
@@ -395,20 +404,46 @@ global.fetch = async (url, options = {}) => {
     assert.strictEqual(result.body.live, true);
     assert.strictEqual(result.body.results.length, 10);
     for (const row of result.body.results) {
-      assert.deepStrictEqual(Object.keys(row).sort(), ['active', 'name', 'sku', 'source']);
+      assert.deepStrictEqual(Object.keys(row).sort(), ['active', 'availability', 'name', 'sku', 'source']);
       assert.strictEqual(row.active, true);
       assert.strictEqual(row.source, 'zoho');
+      const sequence = Number(row.sku.split('-').at(-1));
+      assert.strictEqual(row.availability, sequence % 2 === 0 ? 'ecomm' : 'zoho_only');
       assert.notStrictEqual(row.sku, 'C9300-INACTIVE');
     }
     const serialized = JSON.stringify(result.body);
     assert.ok(!/Unit_Price|raw_secret|2570562000/.test(serialized), serialized);
-    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls.length, 2);
     assert.ok(calls.every(call => call.method === 'GET' && call.body == null), JSON.stringify(calls));
-    const liveUrl = new URL(calls[0].url);
+    const liveUrl = new URL(calls.find((call) => call.url.includes('/Products/search?')).url);
     assert.strictEqual(
       liveUrl.searchParams.get('criteria'),
       '((Product_Code:starts_with:C9300)or(Product_Name:equals:C9300))',
     );
+    const wooUrl = new URL(calls.find((call) => call.url.includes('/WooProducts/search?')).url);
+    assert.match(wooUrl.searchParams.get('criteria'), /WooProduct_Code:equals:C9300-LIVE-00/);
+  });
+
+  await test('/api/product-search does not treat a cached price as eCommerce proof', async () => {
+    const calls = [];
+    global.fetch = async (url, options = {}) => {
+      calls.push(String(url));
+      if (String(url).includes('/Products/search?')) {
+        return new Response(JSON.stringify({ data: [{
+          Product_Code: 'CW9174E-RTG', Product_Name: 'Cisco Wireless 9174E', Product_Active: true,
+        }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (String(url).includes('/WooProducts/search?')) {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    };
+    const result = await testApi.searchActiveProducts('CW9174E-RTG', env);
+    assert.strictEqual(result.live, true);
+    assert.deepStrictEqual(result.results.map((row) => ({ sku: row.sku, availability: row.availability })), [
+      { sku: 'CW9174E-RTG', availability: 'zoho_only' },
+    ]);
+    assert.strictEqual(calls.length, 2);
   });
 
   await test('/api/product-search fails over to stripped active catalog rows', async () => {
@@ -424,9 +459,10 @@ global.fetch = async (url, options = {}) => {
     assert.ok(result.body.results.some(row => row.sku === 'C9300-24P-M'), JSON.stringify(result.body));
     assert.ok(result.body.results.length <= 10);
     for (const row of result.body.results) {
-      assert.deepStrictEqual(Object.keys(row).sort(), ['active', 'name', 'sku', 'source']);
+      assert.deepStrictEqual(Object.keys(row).sort(), ['active', 'availability', 'name', 'sku', 'source']);
       assert.strictEqual(row.active, true);
       assert.strictEqual(row.source, 'catalog');
+      assert.strictEqual(row.availability, 'ecomm');
     }
     assert.strictEqual(calls.length, 1);
     assert.ok(calls.every(call => call.method === 'GET'), JSON.stringify(calls));
@@ -469,9 +505,11 @@ global.fetch = async (url, options = {}) => {
         return await new Promise(() => {});
       },
     };
-    global.fetch = async () => new Response(JSON.stringify({
-      data: [{ Product_Code: 'C9300-24P-M', Product_Name: 'Catalyst 9300', Product_Active: true }],
-    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    global.fetch = async (url) => String(url).includes('/WooProducts/search?')
+      ? new Response(null, { status: 204 })
+      : new Response(JSON.stringify({
+        data: [{ Product_Code: 'C9300-24P-M', Product_Name: 'Catalyst 9300', Product_Active: true }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     const started = Date.now();
     const result = await testApi.searchActiveProducts('C9300-24P', {
       ...env,

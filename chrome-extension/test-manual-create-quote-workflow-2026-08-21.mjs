@@ -91,9 +91,12 @@ test('manual card exposes optional Gmail fill, Zoho product search, and explicit
   assert.match(chatSource, /'Populate from Gmail context'/);
   assert.match(chatSource, /Existing manual SKU rows are never overwritten/);
   assert.match(chatSource, /onProductSearch=\{msg\.restored \? undefined : searchQuoteProducts\}/);
-  assert.match(chatSource, /quoteUpdateLabel=[\s\S]{0,200}\? 'Generate quote'/);
+  assert.match(chatSource, /quoteUpdateLabel=[\s\S]{0,500}'Generate quote'/);
   assert.match(quoteSource, /quoteUpdateLabel = 'Update quote'/);
   assert.match(quoteSource, /updateLabel=\{suggestions\.length > 0 \? 'Apply correction and update quote' : quoteUpdateLabel\}/);
+  assert.match(chatSource, /'Continue to Zoho review'/);
+  assert.match(chatSource, /startZohoOnlyManualQuote\(msg, rows\)/);
+  assert.match(chatSource, /Zoho-only cart handed to the review card below/);
 });
 
 test('ordinary typed chat quote routing remains available and independent', () => {

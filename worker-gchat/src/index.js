@@ -4607,6 +4607,43 @@ function productSearchRank(query, sku, name) {
   return 2;
 }
 
+// A cached price row is not proof that a SKU is currently sold on the
+// storefront. The daily cache intentionally keeps the last known price for
+// WooProducts orphans, so presence in `prices` can outlive the eCommerce row.
+// Query WooProducts itself and accept only an exact, active, positive-price
+// row. This helper is read-only and batches criteria to stay below Zoho's
+// search-clause limits.
+async function lookupActiveEcommSkus(skus, env, { signal } = {}) {
+  const requested = [...new Set((Array.isArray(skus) ? skus : [])
+    .map((sku) => String(sku || '').trim().toUpperCase())
+    .filter((sku) => /^[A-Z0-9][A-Z0-9._/+\-=]{1,79}$/.test(sku)))];
+  const active = new Set();
+  for (let index = 0; index < requested.length; index += 10) {
+    const batch = requested.slice(index, index + 10);
+    const criteria = batch.map((sku) => `(WooProduct_Code:equals:${sku})`).join('or');
+    const response = await zohoApiCall(
+      'GET',
+      `WooProducts/search?criteria=${encodeURIComponent(`(${criteria})`)}&fields=WooProduct_Code,Stratus_Price,Inactive&per_page=200`,
+      env,
+      null,
+      { signal },
+    );
+    if (response?.status === 204) continue;
+    if (!Array.isArray(response?.data)) {
+      const detail = String(response?.code || response?.message || response?.error || 'invalid_response').slice(0, 120);
+      throw new Error(`woo_availability_lookup_failed:${detail}`);
+    }
+    const wanted = new Set(batch);
+    for (const row of response.data) {
+      const sku = String(row?.WooProduct_Code || '').trim().toUpperCase();
+      if (!wanted.has(sku) || sku.includes('+') || row?.Inactive === true) continue;
+      if (!(moneyValue(row?.Stratus_Price) > 0)) continue;
+      active.add(sku);
+    }
+  }
+  return { ok: true, skus: active };
+}
+
 function searchEmbeddedActiveProducts(query) {
   const merged = new Map(Object.entries(staticPrices || {}));
   for (const [sku, row] of Object.entries(livePrices || {})) {
@@ -4622,6 +4659,10 @@ function searchEmbeddedActiveProducts(query) {
       name: String(row?.product_name || row?.name || sku).trim().slice(0, 160),
       active: true,
       source: 'catalog',
+      // Explicit markers are written by the daily Woo scan. Older static
+      // entries predate the marker and retain their historical catalog
+      // behavior until the first successful scan classifies them.
+      availability: row?.ecomm_available === false ? 'zoho_only' : 'ecomm',
     }))
     .sort((a, b) => productSearchRank(query, a.sku, a.name) - productSearchRank(query, b.sku, b.name)
       || a.sku.localeCompare(b.sku))
@@ -4679,7 +4720,33 @@ async function searchActiveProducts(query, env, { deadlineMs = PRODUCT_SEARCH_DE
           name: String(record?.Product_Name || sku).trim().slice(0, 160),
           active: true,
           source: 'zoho',
+          // Start unknown. Only the independent WooProducts read below may
+          // claim current storefront availability.
+          availability: 'unknown',
         });
+        if (bySku.size >= PRODUCT_SEARCH_LIMIT) break;
+      }
+      if (bySku.size > 0) {
+        const availabilityRead = lookupActiveEcommSkus([...bySku.keys()], env, { signal: controller.signal })
+          .catch((error) => {
+            const code = String(error?.name || error?.code || error?.message || 'request_failed').slice(0, 120);
+            console.warn(`[PRODUCT_SEARCH] Woo availability read unavailable (${code})`);
+            return null;
+          });
+        const availability = await Promise.race([availabilityRead, deadline]);
+        if (availability?.ok === true) {
+          for (const [sku, row] of bySku) {
+            row.availability = availability.skus.has(sku) ? 'ecomm' : 'zoho_only';
+          }
+        } else {
+          // A prior successful daily scan is acceptable fail-soft evidence;
+          // plain cache presence is not.
+          for (const [sku, row] of bySku) {
+            const marker = resolveCachedProduct(sku).entry?.ecomm_available;
+            if (marker === true) row.availability = 'ecomm';
+            else if (marker === false) row.availability = 'zoho_only';
+          }
+        }
       }
     }
   } catch (_) {
@@ -10545,12 +10612,19 @@ function canonicalOneshotSkus(skus) {
   for (const line of (Array.isArray(skus) ? skus : [])) {
     const sku = String(line?.sku || line || '').trim().toUpperCase();
     const qty = Number(line?.qty) > 0 ? Number(line.qty) : 1;
+    const rawTier = String(line?.tier || '').trim().toUpperCase().replace(/[\s_-]+/g, '');
+    const tier = rawTier === 'ENT' || rawTier === 'ENTERPRISE' ? 'ENT'
+      : rawTier === 'SEC' || rawTier === 'SECURITY' || rawTier === 'ADVANCEDSECURITY' ? 'SEC'
+        : rawTier === 'SDW' || rawTier === 'SDWAN' || rawTier === 'SDWANPLUS' ? 'SDW'
+          : rawTier === 'A' || rawTier === 'ADV' || rawTier === 'ADVANCED' || rawTier === 'ADVANTAGE' ? 'A'
+            : rawTier ? 'INVALID' : '';
     if (!sku) continue;
-    totals.set(sku, (totals.get(sku) || 0) + qty);
+    const key = `${sku}\u0000${tier}`;
+    const prior = totals.get(key);
+    totals.set(key, { sku, qty: (prior?.qty || 0) + qty, ...(tier ? { tier } : {}) });
   }
-  return [...totals.entries()]
-    .map(([sku, qty]) => ({ sku, qty }))
-    .sort((a, b) => a.sku.localeCompare(b.sku));
+  return [...totals.values()]
+    .sort((a, b) => a.sku.localeCompare(b.sku) || String(a.tier || '').localeCompare(String(b.tier || '')));
 }
 
 // ─── One-shot product snapshot (2026-08-17) ────────────────────────────────
@@ -10596,6 +10670,9 @@ function oneshotCatalogVersion() {
 function oneshotProductRequestDescriptor(input) {
   const p = input || {};
   const hardwareOnly = [...oneshotHardwareOnlyKeys(p.hardware_only_skus)].sort();
+  const zohoListPriceSkus = [...new Set((Array.isArray(p.zoho_list_price_skus) ? p.zoho_list_price_skus : [])
+    .map((sku) => String(sku || '').trim().toUpperCase())
+    .filter(Boolean))].sort();
   return {
     skus: canonicalOneshotSkus(p.skus),
     license_term: p.license_term == null ? null : String(p.license_term),
@@ -10616,6 +10693,11 @@ function oneshotProductRequestDescriptor(input) {
     // identical carts hash differently, and OMITTED when unused so every cart
     // that does not use the feature keeps the fingerprint it had before.
     ...(hardwareOnly.length ? { hardware_only_skus: hardwareOnly } : {}),
+    // Explicitly selected live-Zoho rows that are absent from the embedded
+    // eCommerce catalog. Only these rows may fall back to Zoho Unit_Price with
+    // zero discount; binding the list into the product fingerprint prevents a
+    // caller from introducing list-price fallback after review.
+    ...(zohoListPriceSkus.length ? { zoho_list_price_skus: zohoListPriceSkus } : {}),
   };
 }
 
@@ -10796,6 +10878,7 @@ function expandOneshotRequestedProducts(input) {
     if (!line.sku || !Number.isInteger(line.qty) || line.qty < 1 || line.qty > 99999) {
       blockers.push({ code: 'invalid_sku_quantity' });
     }
+    if (line.tier === 'INVALID') blockers.push({ code: 'invalid_license_tier', sku: line.sku });
   }
   if (blockers.length) return { success: false, lines: [], blockers, ha_mode: haMode };
 
@@ -10976,7 +11059,7 @@ function expandOneshotRequestedProducts(input) {
     expanded.push(line);
     if (!includeLicenses) continue;
     if (oneshotLineIsHardwareOnly(rawSku, hardwareOnlyKeys)) continue;
-    const candidate = selectOneshotLicenseSku(rawSku, term);
+    const candidate = selectOneshotLicenseSku(rawSku, term, line.tier || null);
     if (candidate
         && !explicitByHardware.has(rawSku)
         && !explicitStems.has(oneshotLicenseStem(canonicalOneshotCatalogSku(candidate)))) {
@@ -11001,6 +11084,8 @@ function publicOneshotProductLines(snapshot) {
     ecomm_price: line.ecomm_price ?? null,
     list_price: line.list_price ?? null,
     product_active: line.product_active !== false,
+    availability: line.zoho_only === true ? 'zoho_only' : 'ecomm',
+    pricing_source: line.pricing_source || (line.zoho_only === true ? 'zoho_list_price' : 'ecomm'),
     eol: line.eol === true || undefined,
     replaced_by: line.replaced_by || undefined,
   }));
@@ -11049,6 +11134,21 @@ async function buildOneshotProductSnapshot(input, env, personId, productLookup =
   }
 
   const planId = crypto.randomUUID();
+  const zohoListPriceSkus = new Set((Array.isArray(input?.zoho_list_price_skus) ? input.zoho_list_price_skus : [])
+    .map((sku) => String(sku || '').trim().toUpperCase())
+    .filter(Boolean));
+  // The client may request the Zoho list-price path, but the Worker re-checks
+  // WooProducts before signing the review. This prevents a forged/stale UI
+  // flag from bypassing a real storefront price, and also lets an orphaned
+  // cached price row be treated correctly when WooProducts no longer has it.
+  let zohoOnlyProof = null;
+  if (zohoListPriceSkus.size > 0) {
+    try {
+      zohoOnlyProof = await lookupActiveEcommSkus([...zohoListPriceSkus], env);
+    } catch (error) {
+      console.warn(`[ONESHOT] Zoho-only Woo verification failed: ${String(error?.message || error).slice(0, 160)}`);
+    }
+  }
   const lookup = await productLookup(
     'batch_product_lookup',
     { skus: expanded.lines.map((line) => ({ sku: line.sku, qty: line.qty })) },
@@ -11059,18 +11159,36 @@ async function buildOneshotProductSnapshot(input, env, personId, productLookup =
   const lines = orderOneshotProductRows(expanded.lines.map((requested) => {
     const key = String(requested.sku).toUpperCase();
     const row = resultMap[key] || {};
+    const resolvedSku = String(row.suffixed_sku || key).toUpperCase();
+    const listPrice = typeof row.list_price === 'number' ? row.list_price : null;
+    const hasEcommPrice = typeof row.ecomm_price === 'number' && Number.isFinite(row.ecomm_price) && row.ecomm_price >= 0;
+    const verifiedAbsentFromEcomm = zohoOnlyProof?.ok === true
+      && !zohoOnlyProof.skus.has(key)
+      && !zohoOnlyProof.skus.has(resolvedSku);
+    const mayUseZohoListPrice = zohoListPriceSkus.has(key)
+      && verifiedAbsentFromEcomm
+      && row.found === true
+      && row.product_active !== false
+      && typeof listPrice === 'number'
+      && Number.isFinite(listPrice)
+      && listPrice > 0;
     return {
       input_sku: key,
-      sku: String(row.suffixed_sku || key).toUpperCase(),
+      sku: resolvedSku,
       pricing_sku: row.pricing_sku ? String(row.pricing_sku).toUpperCase() : null,
       qty: requested.qty,
       found: row.found === true,
       product_id: row.product_id ? String(row.product_id) : null,
       product_active: row.product_active !== false,
-      list_price: typeof row.list_price === 'number' ? row.list_price : null,
-      ecomm_price: typeof row.ecomm_price === 'number' ? row.ecomm_price : null,
-      discount_per_unit: typeof row.discount_per_unit === 'number' ? row.discount_per_unit : null,
-      discount_pct: typeof row.discount_pct === 'number' ? row.discount_pct : null,
+      list_price: listPrice,
+      // A Zoho-only Product has no defensible eCommerce discount. The signed
+      // review therefore uses the authoritative Zoho Unit_Price as the quote
+      // unit price and applies zero discount. Normal catalog rows are unchanged.
+      ecomm_price: mayUseZohoListPrice ? listPrice : (hasEcommPrice ? row.ecomm_price : null),
+      discount_per_unit: mayUseZohoListPrice ? 0 : (typeof row.discount_per_unit === 'number' ? row.discount_per_unit : null),
+      discount_pct: mayUseZohoListPrice ? 0 : (typeof row.discount_pct === 'number' ? row.discount_pct : null),
+      zoho_only: mayUseZohoListPrice || undefined,
+      pricing_source: mayUseZohoListPrice ? 'zoho_list_price' : 'ecomm',
       eol: row.eol === true || undefined,
       replaced_by: row.replaced_by || undefined,
     };
@@ -11094,6 +11212,8 @@ async function buildOneshotProductSnapshot(input, env, personId, productLookup =
       product_active: line.product_active,
       list_price: line.list_price,
       ecomm_price: line.ecomm_price,
+      zoho_only: line.zoho_only === true,
+      pricing_source: line.pricing_source,
     })),
   });
   const unsigned = {
@@ -11493,7 +11613,7 @@ async function validateOneshotReviewBinding(input, env, caller) {
     'pinned_deal_account_mismatch', 'pinned_deal_contact_mismatch',
     'unresolved_sku', 'inactive_sku', 'eol_sku',
     'product_lookup_failed', 'isr_not_found',
-    'ha_mode_invalid', 'invalid_sku_quantity', 'ha_requires_shared_license',
+    'ha_mode_invalid', 'invalid_sku_quantity', 'invalid_license_tier', 'ha_requires_shared_license',
     'ha_hardware_required', 'ha_mixed_hardware', 'ha_hardware_unsupported',
     'ha_even_hardware_quantity_required', 'ha_ambiguous_license_lines',
     'ha_license_term_conflict', 'ha_shared_license_unresolved',
@@ -33055,6 +33175,134 @@ async function sendDailyErrorDigest(env) {
   } catch (_) { /* audit flag only */ }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// NEW MERAKI PRODUCT NOTIFICATION — one email on first observation in Zoho.
+// ═══════════════════════════════════════════════════════════════════════════
+const MERAKI_PRODUCT_SEEN_KEY = 'meraki_product_seen_v1';
+const MERAKI_PRODUCT_BOOTSTRAP_DAYS = 30;
+
+function isMerakiProductRecord(record) {
+  const sku = String(record?.Product_Code || record?.sku || '').trim().toUpperCase();
+  const name = String(record?.Product_Name || record?.name || '').trim().toUpperCase();
+  if (!sku || record?.Product_Active === false) return false;
+  // Product_Code is more stable than a manually maintained category field.
+  // Include the Meraki-managed Catalyst wireless/switch/firewall families and
+  // licenses/accessories, while excluding ordinary Cisco catalog additions.
+  if (/^(?:MR\d|MX\d|MS\d|MV\d|MT\d|MG\d|Z\d|CW9\d|MA-|LIC-(?:ENT(?:-|$)|MR-|MX|MS|MV|MT|MG|VMX|MI-))/.test(sku)) return true;
+  if (/^(?:C8(?:111|121|455)-|C9(?:200|300)(?:L|X)?-).*-M(?:-O)?$/.test(sku)) return true;
+  return /\bMERAKI\b/.test(name);
+}
+
+async function discoverActiveMerakiProducts(env, { maxPages = 20 } = {}) {
+  const records = new Map();
+  let page = 1;
+  let pageToken = null;
+  let hasMore = true;
+  while (hasMore && page <= maxPages) {
+    const pageArg = pageToken ? `page_token=${encodeURIComponent(pageToken)}` : `page=${page}`;
+    const response = await zohoApiCall(
+      'GET',
+      `Products?fields=id,Product_Code,Product_Name,Product_Active,Unit_Price,Created_Time,Modified_Time&per_page=200&${pageArg}`,
+      env
+    );
+    const rows = Array.isArray(response?.data) ? response.data : [];
+    if (!rows.length) break;
+    for (const row of rows) {
+      if (!isMerakiProductRecord(row)) continue;
+      const sku = String(row.Product_Code || '').trim().toUpperCase();
+      if (!sku) continue;
+      records.set(sku, {
+        sku,
+        name: String(row.Product_Name || sku).trim().slice(0, 200),
+        list_price: moneyValue(row.Unit_Price) || null,
+        created_at: String(row.Created_Time || '').trim() || null,
+        modified_at: String(row.Modified_Time || '').trim() || null,
+      });
+    }
+    hasMore = response?.info?.more_records === true;
+    pageToken = response?.info?.next_page_token || null;
+    if (page >= 10 && !pageToken) break;
+    page++;
+  }
+  return [...records.values()].sort((a, b) => a.sku.localeCompare(b.sku));
+}
+
+function selectNewMerakiProductNotifications(current, previousState, nowMs = Date.now()) {
+  const rows = Array.isArray(current) ? current : [];
+  const previous = new Set((Array.isArray(previousState?.skus) ? previousState.skus : [])
+    .map((sku) => String(sku || '').trim().toUpperCase()).filter(Boolean));
+  const initialized = previousState?.initialized === true;
+  const bootstrapCutoff = nowMs - MERAKI_PRODUCT_BOOTSTRAP_DAYS * 86400000;
+  return rows.filter((row) => {
+    const sku = String(row?.sku || '').trim().toUpperCase();
+    if (!sku || previous.has(sku)) return false;
+    if (initialized) return true;
+    // The first deployed run establishes a baseline instead of emailing every
+    // historical catalog gap. It still surfaces recent additions such as a
+    // newly introduced CW model that prompted this feature.
+    const createdMs = Date.parse(String(row?.created_at || ''));
+    return Number.isFinite(createdMs) && createdMs >= bootstrapCutoff;
+  });
+}
+
+function buildNewMerakiProductEmailHtml(products) {
+  const cards = products.map((product) => {
+    const ecomm = product.ecomm_available === true
+      ? '<span style="color:#188038;font-weight:700">available</span>'
+      : '<span style="color:#b06000;font-weight:700">not detected — use Zoho review</span>';
+    return `<div style="border:1px solid #dadce0;border-radius:7px;padding:12px;margin:10px 0">
+      <div style="font-size:16px;font-weight:700">${_escapeHtml(product.sku)}</div>
+      <div>${_escapeHtml(product.name || product.sku)}</div>
+      <div style="margin-top:5px;color:#5f6368">Zoho list price: ${product.list_price > 0 ? '$' + Number(product.list_price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'not set'}</div>
+      <div style="color:#5f6368">eCommerce: ${ecomm}</div>
+      ${product.created_at ? `<div style="color:#5f6368">Zoho created: ${_escapeHtml(product.created_at)}</div>` : ''}
+    </div>`;
+  }).join('');
+  return `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:720px">
+    <h2 style="color:#0d4f73">New Meraki product${products.length === 1 ? '' : 's'} detected</h2>
+    <p>This is a one-time heads-up from the daily Zoho catalog scan. No product, price, quote, or storefront record was changed.</p>
+    ${cards}
+  </div>`;
+}
+
+async function notifyNewMerakiProducts(env, currentProducts, ecommSkus = new Set()) {
+  const kv = env?.PRICES_KV || env?.CONVERSATION_KV;
+  if (!kv || typeof kv.get !== 'function' || typeof kv.put !== 'function') return { sent: 0, skipped: 'kv_unavailable' };
+  const previousState = await kv.get(MERAKI_PRODUCT_SEEN_KEY, 'json').catch(() => null);
+  const candidates = selectNewMerakiProductNotifications(currentProducts, previousState);
+  const activeEcomm = new Set([...ecommSkus]
+    .map((sku) => String(sku || '').trim().toUpperCase()).filter(Boolean));
+  const enriched = candidates.map((product) => ({
+    ...product,
+    // Cache presence is deliberately excluded: frozen orphan prices remain in
+    // prices_live even after the storefront row disappears.
+    ecomm_available: activeEcomm.has(String(product.sku || '').trim().toUpperCase()),
+  }));
+  if (enriched.length > 0) {
+    const recipients = String(env.NEW_PRODUCT_NOTIFY_RECIPIENTS || env.SYSTEM_OWNER_EMAIL || 'chrisg@stratusinfosystems.com')
+      .split(',').map((value) => value.trim()).filter(Boolean);
+    if (!recipients.length) return { sent: 0, skipped: 'no_recipients' };
+    const subject = enriched.length === 1
+      ? `[Stratus AI] New Meraki product detected: ${enriched[0].sku}`
+      : `[Stratus AI] ${enriched.length} new Meraki products detected`;
+    await sendDigestEmail(env, recipients, subject, buildNewMerakiProductEmailHtml(enriched));
+    console.log(`[NEW-MERAKI-PRODUCT] emailed ${enriched.length} product(s) to ${recipients.join(', ')}`);
+  }
+  // Write the complete successful scan only after any required email succeeds.
+  // A Gmail failure therefore retries on the next scheduled run rather than
+  // losing the alert behind a prematurely advanced baseline.
+  const seenSkus = new Set([
+    ...(Array.isArray(previousState?.skus) ? previousState.skus : []),
+    ...currentProducts.map((product) => product.sku),
+  ].map((sku) => String(sku || '').trim().toUpperCase()).filter(Boolean));
+  await kv.put(MERAKI_PRODUCT_SEEN_KEY, JSON.stringify({
+    initialized: true,
+    scanned_at: new Date().toISOString(),
+    skus: [...seenSkus].sort(),
+  }));
+  return { sent: enriched.length, candidates: enriched };
+}
+
 export default {
   async fetch(request, env, ctx) {
     // Bind caller identity to this invocation. The platform bindings object can
@@ -41369,6 +41617,10 @@ Return ONLY a JSON object (no markdown, no explanation):
       // routes MS130-48X to that dead key, so every consumer of the cache
       // inherited an 18-month-old price (2026-08-20).
       const orphanedSkus = [];
+      // Current, positive-price, active WooProducts rows only. This is the
+      // eCommerce authority for product search and new-product notifications;
+      // `updatedPrices` also contains frozen orphans and cannot serve as one.
+      const ecommAvailableSkus = new Set();
 
       for (let i = 0; i < skuList.length; i += BATCH_SIZE) {
         const batch = skuList.slice(i, i + BATCH_SIZE);
@@ -41395,7 +41647,7 @@ Return ONLY a JSON object (no markdown, no explanation):
               const result = wooResult.value;
               if (!result?.data?.length) {
                 orphanedSkus.push({ sku, price: existing?.price ?? null, list: existing?.list ?? null });
-                return { sku, price: null };
+                return { sku, price: null, ecommAvailable: false };
               }
 
               // Filter out bundles (codes with '+') and find exact match.
@@ -41437,7 +41689,13 @@ Return ONLY a JSON object (no markdown, no explanation):
               }
               const liveListPrice = productMatch?.Unit_Price ?? null;
 
-              return { sku, price: match?.Stratus_Price ?? null, liveListPrice, liveProductId: productMatch?.id || null };
+              return {
+                sku,
+                price: match?.Stratus_Price ?? null,
+                liveListPrice,
+                liveProductId: productMatch?.id || null,
+                ecommAvailable: wooActiveRows.length > 0,
+              };
             } catch (err) {
               console.error(`[PRICE-CRON] Error fetching ${sku}: ${err.message}`);
               return { sku, price: null, error: true };
@@ -41447,9 +41705,13 @@ Return ONLY a JSON object (no markdown, no explanation):
 
         for (const result of results) {
           if (result.status === 'rejected') { errors++; continue; }
-          const { sku, price, liveListPrice, liveProductId, error } = result.value;
+          const { sku, price, liveListPrice, liveProductId, ecommAvailable, error } = result.value;
 
           if (error) { errors++; continue; }
+          if (typeof ecommAvailable === 'boolean' && updatedPrices[sku]) {
+            updatedPrices[sku].ecomm_available = ecommAvailable;
+            if (ecommAvailable) ecommAvailableSkus.add(sku);
+          }
           if (price == null || price === 0) { skipped++; continue; }
 
           const existing = updatedPrices[sku];
@@ -41597,7 +41859,10 @@ Return ONLY a JSON object (no markdown, no explanation):
         };
 
         for (const [code, price] of Object.entries(allWooSkus)) {
-          if (!updatedPrices[code] && price && price > 0) {
+          if (allWooSkusMeta[code]?.active === true && moneyValue(price) > 0) {
+            ecommAvailableSkus.add(String(code).trim().toUpperCase());
+          }
+          if (!updatedPrices[code] && allWooSkusMeta[code]?.active === true && price && price > 0) {
             if (isEolOrLegacy(code)) {
               filteredOut++;
             } else {
@@ -41689,6 +41954,19 @@ Return ONLY a JSON object (no markdown, no explanation):
           skus: newSkus,
           detectedAt: new Date().toISOString()
         }), { expirationTtl: 604800 }); // 7 days
+      }
+
+      // One-time email for newly observed active Meraki Products. This scans
+      // the authoritative Zoho Products module, so it also catches the exact
+      // pre-storefront gap that WooProducts-only discovery cannot see.
+      try {
+        const merakiProducts = await discoverActiveMerakiProducts(env);
+        const notification = await notifyNewMerakiProducts(env, merakiProducts, ecommAvailableSkus);
+        console.log(`[PRICE-CRON] Meraki product email: ${notification.sent || 0} sent from ${merakiProducts.length} active product(s)`);
+      } catch (err) {
+        // Price refresh must remain independent. A Product scan or Gmail issue
+        // is visible in logs and retries tomorrow without blocking KV pricing.
+        console.error(`[PRICE-CRON] Meraki product email error: ${err.message}`);
       }
 
       // ═══════════════════════════════════════════════════════════════════

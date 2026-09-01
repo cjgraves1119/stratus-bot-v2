@@ -33,6 +33,18 @@ test('strict editor normalization rejects partial invalid input and merges exact
   assert.deepEqual(invalid.rows, []);
 });
 
+test('Zoho-only availability survives normalization and conservatively wins duplicate merges', () => {
+  const normalized = normalizeSkuEditorRows([
+    { sku: 'CW9174E-RTG', qty: 1, availability: 'zoho_only' },
+    { sku: 'cw9174e-rtg', qty: 2, availability: 'ecomm' },
+  ]);
+  assert.equal(normalized.ok, true, normalized.error);
+  assert.deepEqual(normalized.rows, [
+    { sku: 'CW9174E-RTG', qty: 3, availability: 'zoho_only', unresolved: false },
+  ]);
+  assert.equal(quoteTextFromEditorRows(normalized.rows).rows[0].availability, 'zoho_only');
+});
+
 test('a suggestion replacement retains every unrelated SKU and original quantity', () => {
   const rows = applySkuSuggestion([
     { sku: 'C9300-24P', qty: 2, unresolved: true },
@@ -91,7 +103,7 @@ test('chat rebuild uses newest-response and canonical URL-composition gates', ()
 
 test('one-shot product edits force re-plan and cannot execute stale products', () => {
   const source = readFileSync(chatPanelPath, 'utf8');
-  assert.match(source, /onReplan\(\{\s*skus,\s*include_licenses: !hardwareOnly,\s*hardware_only: hardwareOnly,\s*\}\)/,
+  assert.match(source, /onReplan\(\{\s*skus,\s*include_licenses: !hardwareOnly,\s*hardware_only: hardwareOnly,\s*zoho_list_price_skus:/,
     'edited-product re-plan must recompute skus and pass explicit license intent (not reuse a stale normalized.lines snapshot)');
   assert.match(source, /disabled=\{hard\.length > 0 \|\| busy \|\| productDirty\}/);
   assert.match(source, /Product editing is unavailable after an Execute attempt/);
@@ -107,7 +119,10 @@ test('product autocomplete consumes only the sanitized result shape and JSX pars
   const chatSource = readFileSync(chatPanelPath, 'utf8');
   assert.match(editorSource, /Array\.isArray\(response\.results\)/);
   assert.doesNotMatch(editorSource, /product_id|product_name/);
+  assert.match(editorSource, /Zoho only — this cart will skip eCommerce/);
   assert.match(chatSource, /MSG\.PRODUCT_SEARCH/);
+  assert.match(chatSource, /Continue to Zoho review/);
+  assert.match(chatSource, /zoho_list_price_skus/);
 
   for (const [filename, source] of [
     ['QuoteResult.jsx', readFileSync(quoteResultPath, 'utf8')],

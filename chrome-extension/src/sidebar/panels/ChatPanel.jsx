@@ -1391,7 +1391,12 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
     const keepLicenses = msg.base?.hardware_only !== true && msg.base?.include_licenses !== false;
     const planHasLicenses = planLines.some((line) => String(line?.sku || '').toUpperCase().startsWith('LIC-'));
     const source = (keepLicenses && planHasLicenses) ? planLines : (baseSkus.length ? baseSkus : planLines);
-    return source.map((line) => ({ sku: String(line?.sku || '').trim().toUpperCase(), qty: line?.qty ?? 1, tier: line?.tier || '' }));
+    return source.map((line) => ({
+      sku: String(line?.sku || '').trim().toUpperCase(),
+      qty: line?.qty ?? 1,
+      tier: line?.tier || '',
+      ...(line?.availability === 'zoho_only' ? { availability: 'zoho_only' } : {}),
+    }));
   });
   const [productDirty, setProductDirty] = useState(false);
   const [productStatus, setProductStatus] = useState('');
@@ -1596,6 +1601,9 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
       skus,
       include_licenses: !hardwareOnly,
       hardware_only: hardwareOnly,
+      zoho_list_price_skus: prepared.rows
+        .filter((row) => row.availability === 'zoho_only')
+        .map((row) => row.sku),
     });
     if (outcome?.success !== true) {
       setProductStatus(`Re-plan failed: ${outcome?.error || 'the reviewed plan was not replaced'}. Execute remains disabled.`);
@@ -2062,9 +2070,16 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
             </select>
           </div>}
           {(p.lines || []).length > 0 && (
-            <div style={S.sec}><div style={S.lab}>Quote lines (ecomm)</div>
+            <div style={S.sec}><div style={S.lab}>
+              {(p.lines || []).some((line) => line.availability === 'zoho_only')
+                ? 'Quote lines (Zoho review — eCommerce bypassed)'
+                : 'Quote lines (eCommerce)'}
+            </div>
               {(p.lines || []).map((l, i) => (
-                <div key={i}>• {l.sku} × {l.qty}{typeof l.ecomm_price === 'number' ? ` — $${l.ecomm_price} ea` : ' — price unavailable (SKU retained)'}</div>
+                <div key={i}>
+                  • {l.sku} × {l.qty}{typeof l.ecomm_price === 'number' ? ` — $${l.ecomm_price} ea` : ' — price unavailable (SKU retained)'}
+                  {l.availability === 'zoho_only' ? ' — Zoho list price, 0% discount; not on eCommerce' : ''}
+                </div>
               ))}
               {typeof p.total_ecomm === 'number' && <div style={{ fontWeight: 700 }}>Total: ${p.total_ecomm}</div>}
               {productSnapshotLabel && (
@@ -2205,6 +2220,9 @@ export default function ChatPanel({
           name: String(product?.name || '').trim(),
           active: product?.active === true,
           source: String(product?.source || (response.live === true ? 'zoho' : 'catalog')),
+          availability: ['ecomm', 'zoho_only'].includes(String(product?.availability || '').trim())
+            ? String(product.availability).trim()
+            : 'unknown',
         })).filter((product) => product.sku && product.active),
         live: response.live === true,
         error: '',
@@ -3448,12 +3466,23 @@ export default function ChatPanel({
     participantContextMode = 'unscoped',
     hardwareOnlySkus = null,
     intakeIntent = null,
+    directSkus = null,
+    zohoListPriceSkus = null,
   } = {}) {
     if (oneshotPlanStartRef.current) return;
     oneshotPlanStartRef.current = true;
     try {
-      const skus = parseOrderUrlItems(orderUrl);
-      if (!skus.length) { appendMessage(infoMsg('⚠️ No SKUs found on the selected quote URL.')); return; }
+      const skus = Array.isArray(directSkus)
+        ? directSkus.map((line) => ({
+          sku: String(line?.sku || '').trim().toUpperCase(),
+          qty: Number(line?.qty) || 1,
+          ...(String(line?.tier || '').trim() ? { tier: String(line.tier).trim().toUpperCase() } : {}),
+        })).filter((line) => line.sku)
+        : parseOrderUrlItems(orderUrl);
+      if (!skus.length) {
+        appendMessage(infoMsg('⚠️ No SKUs found on the selected quote URL.'));
+        return { success: false, error: 'no_skus' };
+      }
       const participants = (Array.isArray(capturedParticipants)
         ? capturedParticipants
         : (emailContext?.threadContacts || []))
@@ -3500,6 +3529,9 @@ export default function ChatPanel({
         ...(Array.isArray(hardwareOnlySkus) && hardwareOnlySkus.length
           ? { hardware_only_skus: hardwareOnlySkus }
           : {}),
+        ...(Array.isArray(zohoListPriceSkus) && zohoListPriceSkus.length
+          ? { zoho_list_price_skus: [...new Set(zohoListPriceSkus.map((sku) => String(sku || '').trim().toUpperCase()).filter(Boolean))] }
+          : {}),
         ...oneshotHaStateForQuoteOption({ haAvailable: haRequested, hardwareOnly }),
       };
       const pin = effectivePinnedZohoRecord({ contextLock, manualPinnedRecord: manualRecord, autoPinnedRecord });
@@ -3525,7 +3557,7 @@ export default function ChatPanel({
       const res = await sendToBackground(MSG.ONESHOT_PLAN, base).catch((e) => ({ success: false, error: e.message }));
       if (!res || res.success !== true) {
         appendMessage(infoMsg(`⚠️ One-shot plan failed: ${res?.error || 'unknown'}${oneshotStopExplanation(res)}`));
-        return;
+        return { success: false, error: res?.detail || res?.error || 'oneshot_plan_failed' };
       }
       const quoteOptionState = bindOneshotQuoteOptions(quoteOptions, selectedQuoteOptionIndex, res.plan);
       appendMessage({
@@ -3538,10 +3570,52 @@ export default function ChatPanel({
         planRevision: 0,
         idempotencyKey: 'ext:' + (globalThis.crypto?.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2)),
       });
+      return { success: true, plan: res.plan };
     } finally {
       setLoading(false);
       oneshotPlanStartRef.current = false;
     }
+  }
+
+  async function startZohoOnlyManualQuote(msg, rows) {
+    if (!msg?.manualQuoteBuilder || loading) return { success: false, error: 'manual_quote_unavailable' };
+    const prepared = quoteTextFromEditorRows(rows, '', {
+      tier: msg?.draftTier || '',
+      haRequested: explicitQuoteHaRequested(msg),
+    });
+    if (!prepared.ok) {
+      updateMessage(msg.id, { draftRows: rows, draftDirty: true, draftStatus: prepared.error, busy: false });
+      return { success: false, error: prepared.error };
+    }
+    const zohoListPriceSkus = prepared.rows
+      .filter((row) => row.availability === 'zoho_only')
+      .map((row) => row.sku);
+    if (!zohoListPriceSkus.length) return rebuildQuoteMessage(msg, rows);
+    updateMessage(msg.id, {
+      draftRows: prepared.rows,
+      draftDirty: true,
+      draftStatus: 'Opening a read-only Zoho plan. No eCommerce link or CRM record is being created.',
+      busy: true,
+    });
+    const customerContext = quoteCustomerContextForHandoff(msg);
+    const result = await startOneshotFromUrl('', {
+      directSkus: prepared.rows,
+      zohoListPriceSkus,
+      capturedParticipants: customerContext.participants,
+      capturedContactEmail: customerContext.contactEmail,
+      participantContextMode: customerContext.mode,
+      hardwareOnlySkus: prepared.hardwareOnlySkus,
+      intakeIntent: msg?.emailQuoteContext?.intent || null,
+    });
+    updateMessage(msg.id, {
+      draftRows: prepared.rows,
+      draftDirty: true,
+      draftStatus: result?.success === false
+        ? `Zoho review could not be opened: ${result.error || 'unknown error'}. No CRM record was created.`
+        : 'Zoho-only cart handed to the review card below. eCommerce was bypassed; no CRM record exists until Execute is reviewed and clicked.',
+      busy: false,
+    });
+    return result;
   }
 
   // Re-plan a card against the thread the panel is showing RIGHT NOW. A card
@@ -4378,9 +4452,15 @@ export default function ChatPanel({
                   onDraftRowsChange={msg.restored ? undefined : (rows) => handleQuoteDraftRowsChange(msg, rows)}
                   draftTier={msg.draftTier || ''}
                   onDraftTierChange={msg.restored ? undefined : (tier) => handleQuoteDraftTierChange(msg, tier)}
-                  onUpdateQuote={msg.restored ? undefined : (rows) => rebuildQuoteMessage(msg, rows)}
+                  onUpdateQuote={msg.restored ? undefined : (rows) => (
+                    msg.manualQuoteBuilder === true && rows.some((row) => row?.availability === 'zoho_only')
+                      ? startZohoOnlyManualQuote(msg, rows)
+                      : rebuildQuoteMessage(msg, rows)
+                  )}
                   quoteUpdateLabel={msg.manualQuoteBuilder === true && (!Array.isArray(msg.result?.urls) || msg.result.urls.length === 0)
-                    ? 'Generate quote'
+                    ? (draftRows.some((row) => row?.availability === 'zoho_only')
+                      ? 'Continue to Zoho review'
+                      : 'Generate quote')
                     : 'Update quote'}
                   onProductSearch={msg.restored ? undefined : searchQuoteProducts}
                   allowHaLicenseRatio={explicitQuoteHaRequested(msg)}

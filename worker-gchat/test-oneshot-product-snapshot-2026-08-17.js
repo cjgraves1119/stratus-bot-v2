@@ -105,6 +105,8 @@ function loadProductHelpers() {
     grab('expandOneshotRequestedProducts'),
     grab('publicOneshotProductLines'),
     grab('oneshotProductBlockersFromSnapshot'),
+    `let __activeEcommSkus = new Set();`,
+    `const lookupActiveEcommSkus = async () => ({ ok: true, skus: new Set(__activeEcommSkus) });`,
     grab('buildOneshotProductSnapshot'),
     grab('validateOneshotProductSnapshotForExecute'),
     `let __prior = null;`,
@@ -119,7 +121,9 @@ function loadProductHelpers() {
       resolveOneshotProductPlan, compareOneshotEnrichment,
       normalizeOneshotAccountPrefill, oneshotEnrichmentCandidate,
       orderOneshotProductRows, oneshotProductPricingBlocker, quotedItemsFromOneshotProductRows,
-      setPrior(value){ __prior = value; }, staticPrices,
+      setPrior(value){ __prior = value; },
+      setActiveEcommSkus(values){ __activeEcommSkus = new Set(values || []); },
+      staticPrices,
     };`,
   ].join('\n');
   new Function('module', '__staticPrices', 'Buffer', code)(m, staticPrices, Buffer);
@@ -164,6 +168,30 @@ function lookupSpy() {
     assert.deepStrictEqual(H.canonicalOneshotSkus([
       { sku: 'mx75', qty: 1 }, { sku: 'LIC-X', qty: 2 }, { sku: 'MX75', qty: 3 },
     ]), [{ sku: 'LIC-X', qty: 2 }, { sku: 'MX75', qty: 4 }]);
+  });
+
+  await check('direct review rows bind per-line tiers and generate the selected license SKUs', () => {
+    assert.deepStrictEqual(H.canonicalOneshotSkus([
+      { sku: 'mx75', qty: 1, tier: 'enterprise' },
+      { sku: 'MX75', qty: 2, tier: 'ENT' },
+      { sku: 'MX75', qty: 1, tier: 'SEC' },
+    ]), [
+      { sku: 'MX75', qty: 3, tier: 'ENT' },
+      { sku: 'MX75', qty: 1, tier: 'SEC' },
+    ]);
+    const expanded = H.expandOneshotRequestedProducts({
+      ...baseInput,
+      skus: [
+        { sku: 'MX75', qty: 2, tier: 'ENT' },
+        { sku: 'MX75', qty: 1, tier: 'SEC' },
+      ],
+    });
+    assert.strictEqual(expanded.success, true, JSON.stringify(expanded.blockers));
+    assert.deepStrictEqual(expanded.lines, [
+      { sku: 'MX75', qty: 3 },
+      { sku: 'LIC-MX75-ENT-3Y', qty: 2 },
+      { sku: 'LIC-MX75-SEC-3Y', qty: 1 },
+    ]);
   });
 
   await check('standard mode auto-adds one license per device', () => {
@@ -370,6 +398,66 @@ function lookupSpy() {
     const executeCheck = await H.validateOneshotProductSnapshotForExecute(blocked.snapshot, baseInput);
     assert.strictEqual(executeCheck.error, 'product_snapshot_blocked');
     assert.ok(executeCheck.blockers.some((blocker) => blocker.code === 'pricing_unavailable'));
+  });
+
+  await check('explicit Zoho-only rows use signed list price with zero discount and cannot be introduced after review', async () => {
+    const input = {
+      skus: [{ sku: 'CW9174E-RTG', qty: 2 }],
+      include_licenses: false,
+      hardware_only: true,
+      ha_mode: 'standard',
+      zoho_list_price_skus: ['CW9174E-RTG'],
+    };
+    const lookup = async () => ({ products: {
+      'CW9174E-RTG': {
+        suffixed_sku: 'CW9174E-RTG', qty: 2,
+        product_id: '2570562000000091740', product_active: true, found: true,
+        // A stale orphan may still carry an old cached storefront price. The
+        // independent Woo proof must be able to override it.
+        list_price: 2495, ecomm_price: 1995, discount_per_unit: 500, discount_pct: 20,
+      },
+    } });
+    H.setActiveEcommSkus([]);
+    const planned = await H.buildOneshotProductSnapshot(input, {}, 'oneshot:test', lookup);
+    assert.strictEqual(planned.success, true, JSON.stringify(planned.blockers));
+    assert.deepStrictEqual(planned.snapshot.lines.map((line) => ({
+      sku: line.sku,
+      list_price: line.list_price,
+      ecomm_price: line.ecomm_price,
+      discount_per_unit: line.discount_per_unit,
+      zoho_only: line.zoho_only,
+      pricing_source: line.pricing_source,
+    })), [{
+      sku: 'CW9174E-RTG', list_price: 2495, ecomm_price: 2495,
+      discount_per_unit: 0, zoho_only: true, pricing_source: 'zoho_list_price',
+    }]);
+    const executeOk = await H.validateOneshotProductSnapshotForExecute(planned.snapshot, input);
+    assert.strictEqual(executeOk.success, true, JSON.stringify(executeOk));
+    const executeWithoutFallback = await H.validateOneshotProductSnapshotForExecute(planned.snapshot, {
+      ...input, zoho_list_price_skus: [],
+    });
+    assert.strictEqual(executeWithoutFallback.error, 'product_snapshot_mismatch');
+
+    const blocked = await H.buildOneshotProductSnapshot({
+      ...input, zoho_list_price_skus: [],
+    }, {}, 'oneshot:test', async () => ({ products: {
+      'CW9174E-RTG': {
+        suffixed_sku: 'CW9174E-RTG', qty: 2,
+        product_id: '2570562000000091740', product_active: true, found: true,
+        list_price: 2495, ecomm_price: null, discount_per_unit: null,
+      },
+    } }));
+    assert.strictEqual(blocked.success, false);
+    assert.ok(blocked.blockers.some((blocker) => blocker.code === 'pricing_unavailable'));
+
+    // A forged/stale client flag cannot bypass a currently active Woo row.
+    H.setActiveEcommSkus(['CW9174E-RTG']);
+    const storefront = await H.buildOneshotProductSnapshot(input, {}, 'oneshot:test', lookup);
+    assert.strictEqual(storefront.success, true, JSON.stringify(storefront.blockers));
+    assert.strictEqual(storefront.snapshot.lines[0].zoho_only, undefined);
+    assert.strictEqual(storefront.snapshot.lines[0].ecomm_price, 1995);
+    assert.strictEqual(storefront.snapshot.lines[0].pricing_source, 'ecomm');
+    H.setActiveEcommSkus([]);
   });
 
   await check('pricing requires exact nonnegative list-minus-discount math and permits an exact zero row', () => {

@@ -332,6 +332,7 @@ test('product responses are active-only, capped, deduplicated, and stripped', ()
     product_id: `25705620004015234${String(index).padStart(2, '0')}`,
     active: true,
     source: index % 2 ? 'zoho' : 'cache',
+    availability: index % 2 ? 'zoho_only' : 'ecomm',
     unit_price: 123,
     cost: 100,
     margin: 23,
@@ -349,7 +350,9 @@ test('product responses are active-only, capped, deduplicated, and stripped', ()
   assert.equal(result.live, true);
   assert.equal(result.results.length, 10);
   assert.equal(result.results.some((row) => row.sku === 'MR44'), false, 'raw Zoho aliases must not cross the route contract');
-  assert.deepEqual(Object.keys(result.results[0]).sort(), ['active', 'name', 'sku', 'source']);
+  assert.deepEqual(Object.keys(result.results[0]).sort(), ['active', 'availability', 'name', 'sku', 'source']);
+  assert.equal(result.results[0].availability, 'ecomm');
+  assert.equal(result.results[1].availability, 'zoho_only');
   assert.doesNotMatch(JSON.stringify(result), /product_id|unit_price|cost|margin|credentials|debug|must-not-cross/);
 });
 

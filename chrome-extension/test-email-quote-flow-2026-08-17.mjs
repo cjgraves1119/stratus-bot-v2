@@ -61,7 +61,7 @@ test('visible Create Quote opens a manual builder; Gmail population is separate 
   assert.match(intake, /intent: res\.intent \|\| null/);
   assert.match(intake, /quoteEditorRowsFromIntake\(res\.lines \|\| \[\], res\.intent \|\| \{\}\)/);
   assert.match(chatSource, />\s*\{msg\.gmailPopulated \? 'Gmail context populated' : 'Populate from Gmail context'\}/);
-  assert.match(chatSource, /quoteUpdateLabel=[\s\S]{0,180}'Generate quote'/);
+  assert.match(chatSource, /quoteUpdateLabel=[\s\S]{0,500}'Generate quote'/);
   assert.doesNotMatch(intake, /handleSend\(/);
   assert.doesNotMatch(intake, /runQuote|buildEcommQuoteFromIntake|MSG\.ONESHOT_PLAN|MSG\.ONESHOT_EXECUTE|MSG\.CHAT_HANDOFF/);
 

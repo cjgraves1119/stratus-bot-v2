@@ -75,6 +75,9 @@ export default function SkuQuantityEditor({
           sku: String(product?.sku || '').trim().toUpperCase(),
           name: String(product?.name || '').trim(),
           source: String(product?.source || (response.live === true ? 'zoho' : 'catalog')).trim(),
+          availability: ['ecomm', 'zoho_only'].includes(String(product?.availability || '').trim())
+            ? String(product.availability).trim()
+            : 'unknown',
         })).filter((product) => product.sku)
         : [];
       setSearch({
@@ -133,7 +136,10 @@ export default function SkuQuantityEditor({
                   placeholder="Exact SKU"
                   onChange={(event) => {
                     const sku = event.target.value.toUpperCase();
-                    patchRow(index, { sku, unresolved: false });
+                    // Typing changes the identity proof. The user must select a
+                    // fresh search result before this row can be routed as a
+                    // confirmed Zoho-only product.
+                    patchRow(index, { sku, unresolved: false, availability: 'unknown', productSource: undefined });
                     scheduleSearch(index, sku);
                   }}
                   onFocus={() => scheduleSearch(index, row?.sku || '')}
@@ -149,17 +155,27 @@ export default function SkuQuantityEditor({
                       <button
                         key={product.sku}
                         type="button"
+                        disabled={product.availability === 'unknown'}
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => {
-                          patchRow(index, { sku: product.sku, unresolved: false });
+                          patchRow(index, {
+                            sku: product.sku,
+                            unresolved: false,
+                            availability: product.availability,
+                            productSource: product.source,
+                          });
                           searchTokenRef.current += 1;
                           setSearch({ index: -1, query: '', loading: false, products: [], error: '' });
                         }}
-                        style={{ display: 'block', width: '100%', padding: '6px 7px', textAlign: 'left', border: 'none', borderBottom: `1px solid ${COLORS.BORDER}`, background: '#fff', color: COLORS.TEXT_PRIMARY, cursor: 'pointer', fontSize: 10 }}
+                        style={{ display: 'block', width: '100%', padding: '6px 7px', textAlign: 'left', border: 'none', borderBottom: `1px solid ${COLORS.BORDER}`, background: '#fff', color: COLORS.TEXT_PRIMARY, cursor: product.availability === 'unknown' ? 'default' : 'pointer', opacity: product.availability === 'unknown' ? 0.65 : 1, fontSize: 10 }}
                       >
                         <b>{product.sku}</b>{product.name ? ` — ${product.name}` : ''}
                         <span style={{ display: 'block', color: COLORS.TEXT_SECONDARY }}>
-                          {product.source === 'zoho' ? 'live Zoho' : product.source}
+                          {product.availability === 'zoho_only'
+                            ? 'live Zoho · not in eCommerce — Zoho review only'
+                            : product.availability === 'unknown'
+                              ? 'live Zoho · eCommerce status unavailable — retry search'
+                              : (product.source === 'zoho' ? 'live Zoho · eCommerce available' : product.source)}
                         </span>
                       </button>
                     ))}
@@ -254,6 +270,14 @@ export default function SkuQuantityEditor({
                 style={{ marginTop: 3, paddingLeft: 3, fontSize: 9, lineHeight: 1.3, color: annotationColor, fontWeight: mismatch ? 700 : 600 }}
               >
                 {annotation}
+              </div>
+            )}
+            {row?.availability === 'zoho_only' && (
+              <div
+                aria-label={`Zoho-only SKU row ${index + 1}`}
+                style={{ marginTop: 3, paddingLeft: 3, fontSize: 9, lineHeight: 1.3, color: '#8a6100', fontWeight: 700 }}
+              >
+                Zoho only — this cart will skip eCommerce and open the review-before-create workflow at Zoho list price.
               </div>
             )}
           </div>

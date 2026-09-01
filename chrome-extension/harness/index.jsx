@@ -455,7 +455,7 @@ const REAL_PIPELINE_CASES = [
     rows: [
       { sku: 'LIC-ENT-3YR', qty: 2 },
       { sku: 'MX67', qty: 1, tier: 'security' },
-      { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+      { sku: 'LIC-MX67-SEC-3YR', qty: 1, licenseIntent: 'paired' },
     ],
     sourceText: 'MX67 refresh with the listed renewal licences',
     check: (outcome) => successfulCaseChecks(outcome, [
@@ -540,7 +540,7 @@ const REAL_PIPELINE_CASES = [
     name: 'requested-term separate quotes suppress the automatic MX SEC companion',
     rows: [
       { sku: 'MX67', qty: 1, tier: 'security' },
-      { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+      { sku: 'LIC-MX67-SEC-3YR', qty: 1, licenseIntent: 'paired' },
     ],
     sourceText: 'quote the listed products with 3 year licenses',
     workerInputText: 'quote 1 MX67 security and 1 LIC-MX67-SEC-3YR with 3 year licenses in separate quotes',
@@ -615,7 +615,7 @@ const REAL_PIPELINE_CASES = [
     name: 'affirmative warm-spare HA permits reviewed 2:1 MX coverage',
     rows: [
       { sku: 'MX67', qty: 2, tier: 'security' },
-      { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+      { sku: 'LIC-MX67-SEC-3YR', qty: 1, licenseIntent: 'paired' },
     ],
     sourceText: 'Quote the MX67s with warm spare HA.',
     check: (outcome) => {
@@ -632,7 +632,7 @@ const REAL_PIPELINE_CASES = [
     name: 'negated HA never authorizes 2:1 MX coverage',
     rows: [
       { sku: 'MX67', qty: 2, tier: 'security' },
-      { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+      { sku: 'LIC-MX67-SEC-3YR', qty: 1, licenseIntent: 'paired' },
     ],
     sourceText: 'Do not enable HA on these firewalls.',
     check: (outcome) => (!outcome.ok && !outcome.haRequested && !outcome.workerHaRequested
@@ -643,7 +643,7 @@ const REAL_PIPELINE_CASES = [
     name: 'historical HA never authorizes the current 2:1 quote',
     rows: [
       { sku: 'MX67', qty: 2, tier: 'security' },
-      { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+      { sku: 'LIC-MX67-SEC-3YR', qty: 1, licenseIntent: 'paired' },
     ],
     sourceText: 'Previously we used HA. Quote the current MX67 deployment as standard.',
     check: (outcome) => (!outcome.ok && !outcome.haRequested && !outcome.workerHaRequested
@@ -831,9 +831,9 @@ const REAL_PIPELINE_CASES = [
     name: 'paired MX64/MX64W EOL rows keep tiered explicit companions by occurrence',
     rows: [
       { sku: 'MX64', qty: 1, tier: 'enterprise' },
-      { sku: 'LIC-MX64-ENT-3YR', qty: 1 },
+      { sku: 'LIC-MX64-ENT-3YR', qty: 1, licenseIntent: 'paired' },
       { sku: 'MX64W', qty: 2, tier: 'security' },
-      { sku: 'LIC-MX64W-SEC-3YR', qty: 2 },
+      { sku: 'LIC-MX64W-SEC-3YR', qty: 2, licenseIntent: 'paired' },
     ],
     sourceText: 'quote 1 MX64 enterprise and 1 LIC-MX64-ENT-3YR and 2 MX64W security and 2 LIC-MX64W-SEC-3YR',
     workerInputText: 'quote 1 MX64 enterprise and 1 LIC-MX64-ENT-3YR and 2 MX64W security and 2 LIC-MX64W-SEC-3YR',
