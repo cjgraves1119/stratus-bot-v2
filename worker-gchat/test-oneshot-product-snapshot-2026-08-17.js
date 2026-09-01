@@ -107,7 +107,8 @@ function loadProductHelpers() {
     grab('publicOneshotProductLines'),
     grab('oneshotProductBlockersFromSnapshot'),
     `let __activeEcommSkus = new Set();`,
-    `const lookupActiveEcommSkus = async () => ({ ok: true, skus: new Set(__activeEcommSkus) });`,
+    `let __activeEcommLookupError = null;`,
+    `const lookupActiveEcommSkus = async () => { if (__activeEcommLookupError) throw new Error(__activeEcommLookupError); return { ok: true, skus: new Set(__activeEcommSkus) }; };`,
     `let __liveZohoProducts = new Map();`,
     `const lookupLiveZohoProductsByIds = async (ids) => ({ ok: true, products: new Map((ids || []).map((id) => [String(id), __liveZohoProducts.get(String(id))]).filter(([, row]) => row)) });`,
     grab('buildOneshotProductSnapshot'),
@@ -126,6 +127,7 @@ function loadProductHelpers() {
       orderOneshotProductRows, oneshotProductPricingBlocker, quotedItemsFromOneshotProductRows,
       setPrior(value){ __prior = value; },
       setActiveEcommSkus(values){ __activeEcommSkus = new Set(values || []); },
+      setActiveEcommLookupError(value){ __activeEcommLookupError = value ? String(value) : null; },
       setLiveZohoProducts(values){ __liveZohoProducts = new Map((values || []).map((row) => [String(row.id), row])); },
       staticPrices,
     };`,
@@ -543,6 +545,48 @@ function lookupSpy() {
     assert.ok(blocked.blockers.some((blocker) => blocker.code === 'zoho_list_price_unverified'));
     assert.strictEqual(blocked.snapshot.lines[0].pricing_source, 'zoho_list_price_unverified');
     assert.strictEqual(blocked.snapshot.lines[0].ecomm_price, null);
+
+    H.setLiveZohoProducts([{
+      id: '2570562000000091740', Product_Code: 'CW9174E-RTG', Unit_Price: 2595.25,
+      // Product_Active intentionally absent: missing is not affirmative proof.
+    }]);
+    const missingActivity = await H.buildOneshotProductSnapshot(input, {}, 'oneshot:test', async () => ({ products: {
+      'CW9174E-RTG': {
+        suffixed_sku: 'CW9174E-RTG', qty: 2,
+        product_id: '2570562000000091740', product_active: true, found: true,
+        list_price: 2495, ecomm_price: 1995, discount_per_unit: 500,
+      },
+    } }));
+    assert.strictEqual(missingActivity.success, false);
+    assert.ok(missingActivity.blockers.some((blocker) => blocker.code === 'zoho_list_price_unverified'));
+    H.setLiveZohoProducts([]);
+  });
+
+  await check('Zoho-only rows fail closed when independent Woo availability proof throws', async () => {
+    const input = {
+      skus: [{ sku: 'MA-SFP-10GB-SR-AO', qty: 2 }],
+      include_licenses: false, hardware_only: true, ha_mode: 'standard',
+      zoho_list_price_skus: ['MA-SFP-10GB-SR-AO'],
+    };
+    H.setActiveEcommLookupError('simulated Woo availability outage');
+    try {
+      const blocked = await H.buildOneshotProductSnapshot(input, {}, 'oneshot:test', async () => ({ products: {
+        'MA-SFP-10GB-SR-AO': {
+          suffixed_sku: 'MA-SFP-10GB-SR-AO', qty: 2,
+          product_id: '2570562000000091741', product_active: true, found: true,
+          // This stale cache value is the exact fail-open the regression pins.
+          list_price: 1000, ecomm_price: 700, discount_per_unit: 300, discount_pct: 30,
+        },
+      } }));
+      assert.strictEqual(blocked.success, false);
+      assert.ok(blocked.blockers.some((blocker) => blocker.code === 'zoho_list_price_unverified'));
+      assert.strictEqual(blocked.snapshot.lines[0].pricing_source, 'zoho_list_price_unverified');
+      assert.strictEqual(blocked.snapshot.lines[0].list_price, null);
+      assert.strictEqual(blocked.snapshot.lines[0].ecomm_price, null);
+      assert.strictEqual(blocked.snapshot.lines[0].discount_per_unit, null);
+    } finally {
+      H.setActiveEcommLookupError(null);
+    }
   });
 
   await check('pricing requires exact nonnegative list-minus-discount math and permits an exact zero row', () => {

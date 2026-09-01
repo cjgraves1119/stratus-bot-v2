@@ -4720,7 +4720,10 @@ async function lookupLiveZohoProductsByIds(productIds, env) {
       id,
       Product_Code: String(record.Product_Code || '').trim().toUpperCase(),
       Unit_Price: moneyValue(record.Unit_Price),
-      Product_Active: record.Product_Active !== false,
+      // A Zoho-only price is allowed to bypass eCommerce only after every
+      // promised Product field is positively verified. Missing/null activity
+      // is not proof that the Product is active.
+      Product_Active: record.Product_Active === true,
     };
   }));
   return {
@@ -11333,8 +11336,16 @@ async function buildOneshotProductSnapshot(
       && liveCodeMatches
       && Number.isFinite(liveListPrice)
       && liveListPrice > 0;
-    const listPrice = mayUseZohoListPrice ? liveListPrice : cachedListPrice;
-    const zohoOnlyNeedsLiveProof = requestedZohoOnly && verifiedAbsentFromEcomm && !mayUseZohoListPrice;
+    // Fail closed when the independent Woo proof is unavailable. A cached
+    // eCommerce row can outlive its WooProduct, so it must never become a
+    // signed fallback merely because the live availability read threw.
+    // If Woo positively proves the SKU is still sold there, the client flag is
+    // stale/forged and the normal eCommerce price remains authoritative.
+    const zohoOnlyNeedsLiveProof = requestedZohoOnly && (
+      zohoOnlyProof?.ok !== true
+      || (verifiedAbsentFromEcomm && !mayUseZohoListPrice)
+    );
+    const listPrice = zohoOnlyNeedsLiveProof ? null : (mayUseZohoListPrice ? liveListPrice : cachedListPrice);
     return {
       input_sku: key,
       sku: resolvedSku,
@@ -11348,8 +11359,8 @@ async function buildOneshotProductSnapshot(
       // review therefore uses the authoritative Zoho Unit_Price as the quote
       // unit price and applies zero discount. Normal catalog rows are unchanged.
       ecomm_price: mayUseZohoListPrice ? listPrice : (zohoOnlyNeedsLiveProof ? null : (hasEcommPrice ? row.ecomm_price : null)),
-      discount_per_unit: mayUseZohoListPrice ? 0 : (typeof row.discount_per_unit === 'number' ? row.discount_per_unit : null),
-      discount_pct: mayUseZohoListPrice ? 0 : (typeof row.discount_pct === 'number' ? row.discount_pct : null),
+      discount_per_unit: mayUseZohoListPrice ? 0 : (zohoOnlyNeedsLiveProof ? null : (typeof row.discount_per_unit === 'number' ? row.discount_per_unit : null)),
+      discount_pct: mayUseZohoListPrice ? 0 : (zohoOnlyNeedsLiveProof ? null : (typeof row.discount_pct === 'number' ? row.discount_pct : null)),
       zoho_only: mayUseZohoListPrice || undefined,
       zoho_only_live_unverified: zohoOnlyNeedsLiveProof || undefined,
       pricing_source: mayUseZohoListPrice ? 'zoho_list_price' : (zohoOnlyNeedsLiveProof ? 'zoho_list_price_unverified' : 'ecomm'),
@@ -16733,6 +16744,31 @@ const QLE_MAX_ECOMM_LOOKUPS = 60;
 // the ORIGINAL licences is a real record someone has to know about.
 
 const CLONE_TERM_ALLOWED = [1, 3, 5, 7, 10];
+const CLONE_REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9:._-]{7,119}$/;
+
+function cloneQuoteClaimKey(requestId, recordId, term) {
+  const job = term === null ? 'refresh' : `${Number(term)}y`;
+  return `quote-clone:${requestId}:${recordId}:${job}`;
+}
+
+async function readCloneQuoteReplay(env, claimKey) {
+  try {
+    const stored = await env?.CONVERSATION_KV?.get?.(`quote-clone-result:${claimKey}`, 'json');
+    return stored && typeof stored === 'object' ? stored : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function storeCloneQuoteReplay(env, claimKey, result) {
+  try {
+    await env?.CONVERSATION_KV?.put?.(
+      `quote-clone-result:${claimKey}`,
+      JSON.stringify(result),
+      { expirationTtl: 24 * 60 * 60 },
+    );
+  } catch (_) {}
+}
 
 /** Swap the term named in a quote subject, or append one if it names none. */
 function subjectForTerm(subject, termNum) {
@@ -18013,6 +18049,35 @@ async function quoteLineOps(recordId, moduleName, ops, env, options = {}) {
         if (gotSequence !== expected.sequence) {
           mismatches.push(`untouched row ${expected.id}: sequence changed unexpectedly`);
         }
+      }
+    }
+    // Zoho may compact Sequence_Number after a delete, but it must preserve
+    // the survivors' relative order unless the rep explicitly supplied a
+    // reorder. Absolute sequence equality would reject harmless compaction;
+    // comparing the ordered ids catches a real swap without that false alarm.
+    if (deleteSet.size > 0 && sequenceById.size === 0) {
+      const orderedIds = (items, allowedIds) => items
+        .map((item, index) => ({
+          id: String(item?.id || ''),
+          sequence: item?.Sequence_Number === null || item?.Sequence_Number === undefined
+            ? null : Number(item.Sequence_Number),
+          index,
+        }))
+        .filter((item) => allowedIds.has(item.id))
+        .sort((a, b) => {
+          const aHasSequence = Number.isFinite(a.sequence);
+          const bHasSequence = Number.isFinite(b.sequence);
+          if (aHasSequence && bHasSequence && a.sequence !== b.sequence) return a.sequence - b.sequence;
+          if (aHasSequence !== bHasSequence) return aHasSequence ? -1 : 1;
+          return a.index - b.index;
+        })
+        .map((item) => item.id);
+      const expectedIds = new Set(expectedSurvivors.map((item) => item.id));
+      const expectedOrder = orderedIds(currentItems, expectedIds);
+      const actualOrder = orderedIds(afterItems, expectedIds);
+      if (expectedOrder.length !== actualOrder.length
+          || expectedOrder.some((id, index) => actualOrder[index] !== id)) {
+        mismatches.push('untouched rows changed relative order after delete');
       }
     }
     for (const line of planned) {
@@ -39639,6 +39704,10 @@ CRITICAL URL RULES:
             if (!/^\d{10,25}$/.test(recordId)) {
               return new Response(JSON.stringify({ error: 'recordId must be a 10-25 digit string', results: [] }), { status: 400, headers: jsonHeaders });
             }
+            const requestId = String(apiBody?.requestId || '').trim();
+            if (!CLONE_REQUEST_ID_RE.test(requestId)) {
+              return new Response(JSON.stringify({ error: 'requestId must be 8-120 safe characters so clone retries cannot create duplicates.', results: [] }), { status: 400, headers: jsonHeaders });
+            }
             const eolRefresh = normalizeCloneEolRefresh(apiBody?.eolRefresh);
             if (eolRefresh.error) {
               return new Response(JSON.stringify({ error: eolRefresh.error, results: [] }), { status: 400, headers: jsonHeaders });
@@ -39662,18 +39731,56 @@ CRITICAL URL RULES:
             const results = [];
             const jobs = terms.length > 0 ? terms.sort((a, b) => a - b) : [null];
             for (const term of jobs) {
+              const claimKey = cloneQuoteClaimKey(requestId, recordId, term);
+              const claim = await claimOneshotExecution(env, claimKey, apiBody?.personId || null);
+              if (!claim.ok) {
+                if (claim.succeeded) {
+                  const replay = await readCloneQuoteReplay(env, claimKey);
+                  results.push(replay
+                    ? { ...replay, replayed: true }
+                    : {
+                      success: false,
+                      target_term: term,
+                      error: 'clone_already_succeeded',
+                      message: 'This exact clone request already completed. Check Zoho for the created quote; it was not created again.',
+                    });
+                } else {
+                  results.push({
+                    success: false,
+                    target_term: term,
+                    error: claim.error || 'clone_mutex_unavailable',
+                    message: claim.error === 'already_executing'
+                      ? 'This exact clone request is still running. Wait for it to finish; it was not started again.'
+                      : `Clone idempotency protection is unavailable, so no quote was created. ${claim.detail || ''}`.trim(),
+                  });
+                }
+                continue;
+              }
               try {
-                results.push(await cloneQuoteWithTerm(recordId, term, env, {
+                const result = await cloneQuoteWithTerm(recordId, term, env, {
                   personId: apiBody?.personId || null,
                   eolRefresh,
-                }));
+                });
+                results.push(result);
+                // Once a clone id exists, a retry must never make another
+                // record even if the subsequent re-term/verification failed.
+                if (result?.success === true || result?.cloned_quote_id) {
+                  await storeCloneQuoteReplay(env, claimKey, result);
+                  await settleOneshotClaim(env, claimKey, 'succeeded');
+                } else {
+                  await settleOneshotClaim(env, claimKey, 'failed');
+                }
               } catch (err) {
                 const label = term === null ? 'EOL refresh' : `${term}-year clone`;
                 results.push({ success: false, target_term: term, error: 'clone_threw', message: `The ${label} threw: ${err.message}` });
+                // Leave an unexpected mid-flight exception claimed. The stale
+                // reaper may release it later, but an immediate manual retry
+                // cannot duplicate a clone whose response was lost.
               }
             }
             return new Response(JSON.stringify({
               recordId,
+              requestId,
               requested: terms,
               eol_refresh: eolRefresh.enabled ? eolRefresh : null,
               succeeded: results.filter((r) => r.success).length,

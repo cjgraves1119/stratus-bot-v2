@@ -569,7 +569,11 @@ export function diffAgainstOriginal(original, rows, options = {}) {
     const pctMoved = dollars !== effectiveDollars(was);
     const qty = normalizeQuantity(row.qty);
     const wasQty = normalizeQuantity(was.qty);
-    const quantityMoved = qty !== null && wasQty !== null && qty !== wasQty;
+    // A quote can already contain a legacy/fractional quantity that this editor
+    // refuses to write. Once the rep explicitly corrects it to a valid whole
+    // number, that correction must be emitted. Requiring the original to also
+    // normalize made the UI show the new quantity while Zoho kept the old one.
+    const quantityMoved = qty !== null && (wasQty === null || qty !== wasQty);
     const descriptionMoved = writeDescriptions && nextDescription !== (was.description || '');
     if (row.dirty === true && quantityMoved) setQuantities.push({ id: row.id, qty });
     if (row.dirty === true && (pctMoved || descriptionMoved || quantityMoved)) {

@@ -254,6 +254,27 @@ test('deletes are explicit {id, _delete: null} rows and carry no pricing', async
   assert.equal(result.verification.line_count_expected, 2);
 });
 
+test('a delete verifies survivor relative order while allowing sequence compaction', async () => {
+  const compacted = stubZoho({ mutate: (items) => items.map((item, index) => ({
+    ...item,
+    Sequence_Number: index + 1,
+  })) });
+  const compactedResult = await w.quoteLineOps(QUOTE_ID, 'Quotes', { deletes: ['r2'] }, ENV, {});
+  assert.equal(compactedResult.success, true, compactedResult.message);
+  assert.equal(compacted.put, 1);
+
+  const swapped = stubZoho({ mutate: (items) => items.map((item) => {
+    if (item.id === 'r1') return { ...item, Sequence_Number: 2 };
+    if (item.id === 'r2') return { ...item, Sequence_Number: 1 };
+    return item;
+  }) });
+  const swappedResult = await w.quoteLineOps(QUOTE_ID, 'Quotes', { deletes: ['r4'] }, ENV, {});
+  assert.equal(swappedResult.success, false);
+  assert.match(swappedResult.verification.WARNING, /changed relative order after delete/i);
+  assert.equal(swappedResult._undo_token, undefined);
+  assert.equal(swapped.put, 1, 'verification failure must not retry the write');
+});
+
 test('reorder writes Sequence_Number and verifies that it actually landed', async () => {
   const ok = stubZoho();
   const good = await w.quoteLineOps(QUOTE_ID, 'Quotes', { reorder: ['r4', 'r1', 'r2', 'r3'] }, ENV, {});

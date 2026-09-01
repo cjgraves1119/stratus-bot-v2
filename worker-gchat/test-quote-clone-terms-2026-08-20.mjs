@@ -42,7 +42,7 @@ function extractWorker() {
   }
   src += `\nmodule.exports={
     classifyQuoteForTerm, previewCloneQuoteWithTerm, cloneQuoteWithTerm, subjectForTerm,
-    COTERM_DEFAULT_DISCOUNT, CLONE_TERM_ALLOWED,
+    COTERM_DEFAULT_DISCOUNT, CLONE_TERM_ALLOWED, cloneQuoteClaimKey,
     setZohoApiCall:(fn)=>{zohoApiCall=fn;},
     setGetZohoAccessToken:(fn)=>{getZohoAccessToken=fn;}
   };\n`;
@@ -68,6 +68,21 @@ Object.assign(PID_TO_SKU, {
 });
 
 const SRC_ID = '2570562000422125077';
+
+test('clone idempotency keys isolate source, term, refresh, and client request', () => {
+  assert.equal(
+    w.cloneQuoteClaimKey('req-12345678', SRC_ID, 3),
+    `quote-clone:req-12345678:${SRC_ID}:3y`,
+  );
+  assert.equal(
+    w.cloneQuoteClaimKey('req-12345678', SRC_ID, null),
+    `quote-clone:req-12345678:${SRC_ID}:refresh`,
+  );
+  assert.notEqual(
+    w.cloneQuoteClaimKey('req-12345678', SRC_ID, 3),
+    w.cloneQuoteClaimKey('req-87654321', SRC_ID, 3),
+  );
+});
 const CLONE_ID = '2570562000999000111';
 
 /** A mixed quote: 3 hardware lines and 2 termed licences, all at 1 year. */
@@ -840,6 +855,14 @@ test('the endpoints are registered and the write path is sequential', () => {
 
   const start = SOURCE.indexOf("case '/api/quote-clone-terms': {");
   const block = SOURCE.slice(start, SOURCE.indexOf("case '/api/quote-clone-terms-preview': {", start));
+  assert.match(block, /CLONE_REQUEST_ID_RE\.test\(requestId\)/,
+    'write requests require a stable client request id');
+  assert.match(block, /claimOneshotExecution\(env, claimKey/,
+    'each term job uses the existing atomic D1 claim before cloning');
+  assert.match(block, /readCloneQuoteReplay\(env, claimKey\)/,
+    'a completed retry replays the prior result instead of cloning again');
+  assert.match(block, /result\?\.success === true \|\| result\?\.cloned_quote_id/,
+    'even an unverified orphan clone is settled as created and cannot duplicate');
   // A clone is several Zoho calls and zohoApiCall has no 429 retry, so terms
   // are never fanned out.
   assert.doesNotMatch(block, /Promise\.all/);

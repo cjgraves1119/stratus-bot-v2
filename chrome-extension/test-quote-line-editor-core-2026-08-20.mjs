@@ -258,6 +258,26 @@ test('a quantity edit rejects unsafe values and invalidates stale pricing badges
   assert.equal(changed.costError, '');
 });
 
+test('correcting a legacy fractional quantity emits quantity and discount operations atomically', () => {
+  const original = linesFromApi({
+    lines: [{
+      id: 'legacy-fractional', sku: 'SERVICE-LEGACY', name: 'Legacy service',
+      qty: 2.5, listPrice: 100, discount: 25, description: 'Original note', sequence: 1,
+    }],
+  });
+  assert.equal(validateRows(original).ok, false, 'the untouched fractional quantity stays blocked');
+
+  const corrected = setRowQuantity(original, 'legacy-fractional', 3);
+  const built = buildOpsPayload(original, corrected, {
+    recordId: API.quoteId,
+    writeDescriptions: false,
+  });
+  assert.equal(built.ok, true, built.error);
+  assert.deepEqual(built.payload.ops.setQuantities, [{ id: 'legacy-fractional', qty: 3 }]);
+  assert.deepEqual(built.payload.ops.setDiscounts, [{ id: 'legacy-fractional', pct: 10 }]);
+  assert.equal(built.diff.hasChanges, true);
+});
+
 test('a quantity edit followed by exact pricing carries fresh dollars against the new quantity', () => {
   const original = rowsOf();
   const resized = setRowQuantity(original, 'r3', 3);
@@ -949,7 +969,7 @@ test('clone refresh request logic is narrow and never increases selected-term cl
   assert.equal(eolReplacementDescription({ description: 'Replaces EOL MX100' }, {}), 'Replaces EOL MX100');
 });
 
-test('the clone term and EOL refresh card auto-previews safely and never auto-retries a write', () => {
+test('the clone term and EOL refresh card auto-previews safely and reuses an idempotency key only for manual retry', () => {
   const source = fs.readFileSync(EDITOR_PATH, 'utf8');
   // Terms offered, matching the worker's CLONE_TERM_ALLOWED.
   assert.match(source, /const CLONE_TERMS = \[1, 3, 5, 7, 10\]/);
@@ -974,7 +994,10 @@ test('the clone term and EOL refresh card auto-previews safely and never auto-re
   // A clone creates records, so it must never be retried automatically: a
   // retry after a partial failure would leave duplicate quotes behind.
   const runClones = source.slice(source.indexOf('async function runClones()'));
-  assert.doesNotMatch(runClones.slice(0, runClones.indexOf('\n  }')), /retry|for \(|while \(/);
+  const runCloneBody = runClones.slice(0, runClones.indexOf('\n  }'));
+  assert.doesNotMatch(runCloneBody, /for \(|while \(/, 'the client never automatically loops or retries a clone write');
+  assert.match(runCloneBody, /cloneRequestRef\.current\?\.fingerprint !== requestFingerprint/);
+  assert.match(runCloneBody, /requestId: cloneRequestRef\.current\.requestId/);
   // A clone reads what Zoho holds, not the rep's uncommitted edits, and says so.
   assert.match(source, /The clone is made from what Zoho holds now, not your uncommitted edits/);
   // Committing is blocked while a clone is in flight.

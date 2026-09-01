@@ -231,6 +231,10 @@ export default function QuoteLineEditor({
   const [marginPct, setMarginPct] = useState('');
   const [marginBusy, setMarginBusy] = useState(false);
   const [marginNote, setMarginNote] = useState('');
+  // Retain one idempotency key across an ambiguous network failure and any
+  // manual retry of the exact same clone request. Changing terms/refresh
+  // options creates a new fingerprint and therefore a new deliberate request.
+  const cloneRequestRef = useRef(null);
 
   // The callbacks are held in a ref so the load effect depends on the RECORD,
   // not on prop identity. A parent that passes an inline arrow (the harness
@@ -253,6 +257,7 @@ export default function QuoteLineEditor({
     setCloneTerms([]);
     setCloneEolRefresh(false);
     setCloneReplacementPath('');
+    cloneRequestRef.current = null;
     try {
       const payload = await handlers.current.onLoad(recordId, module);
       if (payload?.error) { setLoadError(payload.error); setRows([]); setOriginal([]); setMeta(null); return; }
@@ -473,16 +478,31 @@ export default function QuoteLineEditor({
           return;
         }
       }
+      const requestFingerprint = JSON.stringify({
+        recordId,
+        terms: [...cloneTerms].map(Number).sort((a, b) => a - b),
+        eolRefresh: cloneEolRefreshRequest(cloneEolRefresh, cloneReplacementPath),
+      });
+      if (cloneRequestRef.current?.fingerprint !== requestFingerprint) {
+        cloneRequestRef.current = {
+          fingerprint: requestFingerprint,
+          requestId: globalThis.crypto?.randomUUID
+            ? globalThis.crypto.randomUUID()
+            : `clone-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        };
+      }
       const response = await handlers.current.onCloneTerms({
         recordId,
         terms: cloneTerms,
         personId,
         eolRefresh: cloneEolRefreshRequest(cloneEolRefresh, cloneReplacementPath),
+        requestId: cloneRequestRef.current.requestId,
       });
-      if (response?.error) { setCloneNote(response.error); return; }
+      if (response?.error) { cloneRequestRef.current = null; setCloneNote(response.error); return; }
       const results = Array.isArray(response?.results) ? response.results : [];
       setCloneResults(results);
       const ok = results.filter((r) => r.success).length;
+      if (results.length > 0 && ok === results.length) cloneRequestRef.current = null;
       setCloneNote(ok === results.length
         ? `${ok} quote(s) created and verified.`
         : `${ok} of ${results.length} clone(s) succeeded. Read each result below before using them.`);
