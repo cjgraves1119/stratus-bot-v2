@@ -4700,6 +4700,35 @@ async function lookupActiveEcommSkus(skus, env, { signal } = {}) {
   return { ok: true, skus: active };
 }
 
+// A Zoho-only review promises the price displayed to the rep is the current
+// Products.Unit_Price that Zoho will apply at write time. The embedded catalog
+// is intentionally a fast identity cache and may lag a Product price change,
+// so read the already-resolved Product ids live before signing those rows.
+async function lookupLiveZohoProductsByIds(productIds, env) {
+  const ids = [...new Set((Array.isArray(productIds) ? productIds : [])
+    .map((value) => String(value || '').trim())
+    .filter((value) => /^\d{15,20}$/.test(value)))];
+  const rows = await Promise.all(ids.map(async (id) => {
+    const response = await zohoApiCall(
+      'GET',
+      `Products/${encodeURIComponent(id)}?fields=id,Product_Code,Unit_Price,Product_Active`,
+      env,
+    );
+    const record = Array.isArray(response?.data) ? response.data[0] : null;
+    if (!record || String(record.id || '') !== id) return null;
+    return {
+      id,
+      Product_Code: String(record.Product_Code || '').trim().toUpperCase(),
+      Unit_Price: moneyValue(record.Unit_Price),
+      Product_Active: record.Product_Active !== false,
+    };
+  }));
+  return {
+    ok: true,
+    products: new Map(rows.filter(Boolean).map((row) => [row.id, row])),
+  };
+}
+
 function searchEmbeddedActiveProducts(query) {
   const merged = new Map(Object.entries(staticPrices || {}));
   for (const [sku, row] of Object.entries(livePrices || {})) {
@@ -11218,7 +11247,13 @@ function oneshotProductBlockersFromSnapshot(snapshot) {
   });
 }
 
-async function buildOneshotProductSnapshot(input, env, personId, productLookup = executeToolCall) {
+async function buildOneshotProductSnapshot(
+  input,
+  env,
+  personId,
+  productLookup = executeToolCall,
+  liveZohoProductLookup = lookupLiveZohoProductsByIds,
+) {
   const descriptor = oneshotProductRequestDescriptor(input);
   const requestFingerprint = await hashOneshotValue(descriptor);
   const expanded = expandOneshotRequestedProducts(input);
@@ -11254,22 +11289,52 @@ async function buildOneshotProductSnapshot(input, env, personId, productLookup =
     personId
   );
   const resultMap = lookup?.products || lookup?.results || {};
+  let liveZohoOnlyProducts = { ok: true, products: new Map() };
+  if (zohoOnlyProof?.ok === true && zohoListPriceSkus.size > 0) {
+    const liveIds = [];
+    for (const requested of expanded.lines) {
+      const key = String(requested.sku || '').trim().toUpperCase();
+      const row = resultMap[key] || {};
+      const resolvedSku = String(row.suffixed_sku || key).trim().toUpperCase();
+      const requestedZohoOnly = zohoListPriceSkus.has(key) || zohoListPriceSkus.has(resolvedSku);
+      const verifiedAbsentFromEcomm = !zohoOnlyProof.skus.has(key) && !zohoOnlyProof.skus.has(resolvedSku);
+      if (requestedZohoOnly && verifiedAbsentFromEcomm && row.product_id) liveIds.push(String(row.product_id));
+    }
+    if (liveIds.length > 0) {
+      try {
+        liveZohoOnlyProducts = await liveZohoProductLookup(liveIds, env);
+      } catch (error) {
+        liveZohoOnlyProducts = { ok: false, products: new Map(), error: String(error?.message || error) };
+        console.warn(`[ONESHOT] Zoho-only live Product pricing failed: ${liveZohoOnlyProducts.error.slice(0, 160)}`);
+      }
+    }
+  }
   const lines = orderOneshotProductRows(expanded.lines.map((requested) => {
     const key = String(requested.sku).toUpperCase();
     const row = resultMap[key] || {};
     const resolvedSku = String(row.suffixed_sku || key).toUpperCase();
-    const listPrice = typeof row.list_price === 'number' ? row.list_price : null;
+    const cachedListPrice = typeof row.list_price === 'number' ? row.list_price : null;
     const hasEcommPrice = typeof row.ecomm_price === 'number' && Number.isFinite(row.ecomm_price) && row.ecomm_price >= 0;
+    const requestedZohoOnly = zohoListPriceSkus.has(key) || zohoListPriceSkus.has(resolvedSku);
     const verifiedAbsentFromEcomm = zohoOnlyProof?.ok === true
       && !zohoOnlyProof.skus.has(key)
       && !zohoOnlyProof.skus.has(resolvedSku);
-    const mayUseZohoListPrice = zohoListPriceSkus.has(key)
+    const liveProduct = liveZohoOnlyProducts?.products?.get?.(String(row.product_id || '')) || null;
+    const liveCode = String(liveProduct?.Product_Code || '').trim().toUpperCase();
+    const liveCodeMatches = !!liveCode && [key, resolvedSku].some((candidate) => (
+      candidate === liveCode || candidate.replace(/=+$/, '') === liveCode.replace(/=+$/, '')
+    ));
+    const liveListPrice = Number(liveProduct?.Unit_Price);
+    const mayUseZohoListPrice = requestedZohoOnly
       && verifiedAbsentFromEcomm
       && row.found === true
-      && row.product_active !== false
-      && typeof listPrice === 'number'
-      && Number.isFinite(listPrice)
-      && listPrice > 0;
+      && liveZohoOnlyProducts?.ok === true
+      && liveProduct?.Product_Active === true
+      && liveCodeMatches
+      && Number.isFinite(liveListPrice)
+      && liveListPrice > 0;
+    const listPrice = mayUseZohoListPrice ? liveListPrice : cachedListPrice;
+    const zohoOnlyNeedsLiveProof = requestedZohoOnly && verifiedAbsentFromEcomm && !mayUseZohoListPrice;
     return {
       input_sku: key,
       sku: resolvedSku,
@@ -11282,11 +11347,12 @@ async function buildOneshotProductSnapshot(input, env, personId, productLookup =
       // A Zoho-only Product has no defensible eCommerce discount. The signed
       // review therefore uses the authoritative Zoho Unit_Price as the quote
       // unit price and applies zero discount. Normal catalog rows are unchanged.
-      ecomm_price: mayUseZohoListPrice ? listPrice : (hasEcommPrice ? row.ecomm_price : null),
+      ecomm_price: mayUseZohoListPrice ? listPrice : (zohoOnlyNeedsLiveProof ? null : (hasEcommPrice ? row.ecomm_price : null)),
       discount_per_unit: mayUseZohoListPrice ? 0 : (typeof row.discount_per_unit === 'number' ? row.discount_per_unit : null),
       discount_pct: mayUseZohoListPrice ? 0 : (typeof row.discount_pct === 'number' ? row.discount_pct : null),
       zoho_only: mayUseZohoListPrice || undefined,
-      pricing_source: mayUseZohoListPrice ? 'zoho_list_price' : 'ecomm',
+      zoho_only_live_unverified: zohoOnlyNeedsLiveProof || undefined,
+      pricing_source: mayUseZohoListPrice ? 'zoho_list_price' : (zohoOnlyNeedsLiveProof ? 'zoho_list_price_unverified' : 'ecomm'),
       eol: row.eol === true || undefined,
       replaced_by: row.replaced_by || undefined,
     };
@@ -11296,6 +11362,7 @@ async function buildOneshotProductSnapshot(input, env, personId, productLookup =
     if (!line.found || !line.product_id) blockers.push({ code: 'unresolved_sku', sku: line.sku });
     else if (!line.product_active) blockers.push({ code: 'inactive_sku', sku: line.sku, replaced_by: line.replaced_by });
     if (line.eol) blockers.push({ code: 'eol_sku', sku: line.sku, replaced_by: line.replaced_by });
+    if (line.zoho_only_live_unverified) blockers.push({ code: 'zoho_list_price_unverified', sku: line.sku });
     const pricingBlocker = oneshotProductPricingBlocker(line);
     if (pricingBlocker) blockers.push(pricingBlocker);
   }

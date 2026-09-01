@@ -108,6 +108,8 @@ function loadProductHelpers() {
     grab('oneshotProductBlockersFromSnapshot'),
     `let __activeEcommSkus = new Set();`,
     `const lookupActiveEcommSkus = async () => ({ ok: true, skus: new Set(__activeEcommSkus) });`,
+    `let __liveZohoProducts = new Map();`,
+    `const lookupLiveZohoProductsByIds = async (ids) => ({ ok: true, products: new Map((ids || []).map((id) => [String(id), __liveZohoProducts.get(String(id))]).filter(([, row]) => row)) });`,
     grab('buildOneshotProductSnapshot'),
     grab('validateOneshotProductSnapshotForExecute'),
     `let __prior = null;`,
@@ -124,6 +126,7 @@ function loadProductHelpers() {
       orderOneshotProductRows, oneshotProductPricingBlocker, quotedItemsFromOneshotProductRows,
       setPrior(value){ __prior = value; },
       setActiveEcommSkus(values){ __activeEcommSkus = new Set(values || []); },
+      setLiveZohoProducts(values){ __liveZohoProducts = new Map((values || []).map((row) => [String(row.id), row])); },
       staticPrices,
     };`,
   ].join('\n');
@@ -474,6 +477,10 @@ function lookupSpy() {
       },
     } });
     H.setActiveEcommSkus([]);
+    H.setLiveZohoProducts([{
+      id: '2570562000000091740', Product_Code: 'CW9174E-RTG',
+      Unit_Price: 2595.25, Product_Active: true,
+    }]);
     const planned = await H.buildOneshotProductSnapshot(input, {}, 'oneshot:test', lookup);
     assert.strictEqual(planned.success, true, JSON.stringify(planned.blockers));
     assert.deepStrictEqual(planned.snapshot.lines.map((line) => ({
@@ -484,7 +491,7 @@ function lookupSpy() {
       zoho_only: line.zoho_only,
       pricing_source: line.pricing_source,
     })), [{
-      sku: 'CW9174E-RTG', list_price: 2495, ecomm_price: 2495,
+      sku: 'CW9174E-RTG', list_price: 2595.25, ecomm_price: 2595.25,
       discount_per_unit: 0, zoho_only: true, pricing_source: 'zoho_list_price',
     }]);
     const executeOk = await H.validateOneshotProductSnapshotForExecute(planned.snapshot, input);
@@ -514,6 +521,28 @@ function lookupSpy() {
     assert.strictEqual(storefront.snapshot.lines[0].ecomm_price, 1995);
     assert.strictEqual(storefront.snapshot.lines[0].pricing_source, 'ecomm');
     H.setActiveEcommSkus([]);
+    H.setLiveZohoProducts([]);
+  });
+
+  await check('Zoho-only rows fail closed when live Product pricing cannot be verified', async () => {
+    const input = {
+      skus: [{ sku: 'CW9174E-RTG', qty: 2 }],
+      include_licenses: false, hardware_only: true, ha_mode: 'standard',
+      zoho_list_price_skus: ['CW9174E-RTG'],
+    };
+    H.setActiveEcommSkus([]);
+    H.setLiveZohoProducts([]);
+    const blocked = await H.buildOneshotProductSnapshot(input, {}, 'oneshot:test', async () => ({ products: {
+      'CW9174E-RTG': {
+        suffixed_sku: 'CW9174E-RTG', qty: 2,
+        product_id: '2570562000000091740', product_active: true, found: true,
+        list_price: 2495, ecomm_price: 1995, discount_per_unit: 500,
+      },
+    } }));
+    assert.strictEqual(blocked.success, false);
+    assert.ok(blocked.blockers.some((blocker) => blocker.code === 'zoho_list_price_unverified'));
+    assert.strictEqual(blocked.snapshot.lines[0].pricing_source, 'zoho_list_price_unverified');
+    assert.strictEqual(blocked.snapshot.lines[0].ecomm_price, null);
   });
 
   await check('pricing requires exact nonnegative list-minus-discount math and permits an exact zero row', () => {
