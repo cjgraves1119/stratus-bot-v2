@@ -2,6 +2,7 @@ import {
   normalizeEditableQuoteLines,
   normalizeQuoteIntakeLines,
 } from '../../lib/email-quote-flow.mjs';
+import { collapseSpokenPluralRows, dropSpokenPluralSuggestionRows } from '../../lib/nl-plural-sku.mjs';
 
 const SAFE_SKU = /^[A-Z0-9][A-Z0-9._/-]{1,79}$/;
 const MAX_ROWS = 100;
@@ -81,7 +82,9 @@ export function editableRowsFromResult(result) {
   // still opt a license into Standalone renewal, but a normal generated quote
   // should not require a second confirmation before quantities can stay in
   // sync. This is metadata only; final SKU aggregation remains in the Worker.
-  return withDefaultPairedLicenseIntents(rows.slice(0, MAX_ROWS));
+  return withDefaultPairedLicenseIntents(
+    collapseSpokenPluralRows(dropSpokenPluralSuggestionRows(rows)).slice(0, MAX_ROWS),
+  );
 }
 
 /** The manual-first Create Quote card always starts with one usable blank row. */

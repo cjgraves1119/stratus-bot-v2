@@ -11,6 +11,7 @@
  */
 
 import catalog from './auto-catalog.json';
+import { canonicalizeSpokenSku } from './nl-plural-sku.mjs';
 
 // ============================================================================
 // CATALOG DATA
@@ -747,13 +748,9 @@ export function parseSkuInput(text) {
       let sku = match[0];
       const pos = match.index;
 
-      // Strip trailing 'S' (pluralization) if the stripped version is valid but full isn't
-      if (sku.endsWith('S') && sku.length > 3) {
-        const stripped = sku.slice(0, -1);
-        const strippedValid = VALID_SKUS.has(stripped) || detectFamily(stripped) !== null;
-        const fullValid = VALID_SKUS.has(sku);
-        if (strippedValid && !fullValid) sku = stripped;
-      }
+      // Spoken English plurals (MR46s, MX450s) collapse to the catalog model.
+      // Real S-suffix SKUs (C9300-24S-M) are kept.
+      sku = canonicalizeSpokenSku(sku, (candidate) => VALID_SKUS.has(candidate));
 
       if (matched.has(sku)) continue;
       matched.add(sku);
