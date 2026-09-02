@@ -144,6 +144,11 @@ function classification(result) {
     assert.notStrictEqual(calls.identity.signal, calls.woo.signal, 'reads must not share one AbortSignal');
     assert.strictEqual(calls.all.length, 2);
     assert.ok(calls.all.every((call) => call.method === 'GET'));
+    assert.strictEqual(
+      new URL(calls.all[1].url).searchParams.get('criteria'),
+      '((WooProduct_Code:equals:ZZ-STAGED-01)or(WooProduct_Code:equals:ZZ-STAGED-02))',
+      'a batched availability read must retain the grouped OR criterion',
+    );
   });
 
   await test('Woo exhausting its own budget leaves rows unknown (never ecomm, never zoho_only) and stays bounded', async () => {
@@ -202,7 +207,11 @@ function classification(result) {
     assert.strictEqual(result.live, true);
     assert.deepStrictEqual(classification(result), [['ZZ-STAGED-01', 'zoho', 'ecomm']]);
     assert.strictEqual(calls.woo.completed, true);
-    assert.match(new URL(calls.all[1].url).searchParams.get('criteria'), /WooProduct_Code:equals:ZZ-STAGED-01/);
+    assert.strictEqual(
+      new URL(calls.all[1].url).searchParams.get('criteria'),
+      '(WooProduct_Code:equals:ZZ-STAGED-01)',
+      'an exact retry must use the same single-wrapper criterion as the working live-pricing path',
+    );
   });
 
   await test('the deadline option is capped so both budgets together stay under 2x PRODUCT_SEARCH_DEADLINE_MS', () => {

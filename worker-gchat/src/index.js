@@ -4710,10 +4710,15 @@ async function lookupActiveEcommSkus(skus, env, { signal } = {}) {
   const active = new Set();
   for (let index = 0; index < requested.length; index += 10) {
     const batch = requested.slice(index, index + 10);
-    const criteria = batch.map((sku) => `(WooProduct_Code:equals:${sku})`).join('or');
+    const clauses = batch.map((sku) => `(WooProduct_Code:equals:${sku})`);
+    // Zoho accepts one exact clause with one wrapper. Wrapping the one-item
+    // form again produced `((...))`, which made the installed exact-SKU retry
+    // fall back to `unknown` even though the same WooProducts row was readable
+    // through the established live-pricing path.
+    const criteria = clauses.length === 1 ? clauses[0] : `(${clauses.join('or')})`;
     const response = await zohoApiCall(
       'GET',
-      `WooProducts/search?criteria=${encodeURIComponent(`(${criteria})`)}&fields=WooProduct_Code,Stratus_Price,Inactive&per_page=200`,
+      `WooProducts/search?criteria=${encodeURIComponent(criteria)}&fields=WooProduct_Code,Stratus_Price,Inactive&per_page=200`,
       env,
       null,
       { signal },
