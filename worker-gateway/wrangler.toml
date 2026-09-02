@@ -17,6 +17,11 @@ GATEWAY_VERSION = "1.0.0-gemma-first"
 # The gateway forwards this as X-Gateway-Secret to the main worker's
 # /api/chat-waterfall endpoint so service-binding callers authenticate.
 # The same secret must be set on stratus-ai-bot-gchat.
+#
+# Lead-time / Webex inbound (names only — do not put values in [vars] or git):
+# wrangler secret put COMPOSIO_API_KEY
+# wrangler secret put COMPOSIO_WEBHOOK_SECRET
+# wrangler secret put WEBEX_WEBHOOK_SECRET
 
 # Service binding to main worker (where tool execution lives)
 [[services]]

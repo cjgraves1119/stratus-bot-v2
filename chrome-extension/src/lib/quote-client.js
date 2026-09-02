@@ -17,6 +17,7 @@
 import { sendToBackground } from './messaging';
 import { MSG } from './constants';
 import { parseStratusOrderUrl } from './zoho-url.js';
+import { collapseSpokenPluralRows } from './nl-plural-sku.mjs';
 
 const ORDER_BASE = 'https://stratusinfosystems.com/order/';
 
@@ -210,7 +211,7 @@ export function mapQuoteResponse(res, mrEntQty = 0) {
       urls: urlsArr.map(toUrlObj),
       eolWarnings: eolArr,
       suggestions: suggestArr,
-      parsed: parsedRaw.map(toParsedRow),
+      parsed: collapseSpokenPluralRows(parsedRaw.map(toParsedRow)),
       claudeResponse: res.claudeResponse || res.analysis || res.error || res.recovery.detail || 'A specific recovery step is required.',
       recovery: res.recovery,
       handlerType: res.handlerType || 'complexity-recovery',
@@ -220,7 +221,7 @@ export function mapQuoteResponse(res, mrEntQty = 0) {
   if (urlsArr.length > 0 || (suggestArr && suggestArr.length > 0) || res.claudeResponse) {
     let finalUrls = urlsArr.map(toUrlObj);
     if (mrEntQty > 0) finalUrls = mergeMrEntIntoQuoteOptions(finalUrls, mrEntQty);
-    const parsed = parsedRaw.map(toParsedRow);
+    const parsed = collapseSpokenPluralRows(parsedRaw.map(toParsedRow));
     if (mrEntQty > 0) parsed.push({ baseSku: 'MR-ENT', qty: mrEntQty });
     return { result: {
       urls: finalUrls,

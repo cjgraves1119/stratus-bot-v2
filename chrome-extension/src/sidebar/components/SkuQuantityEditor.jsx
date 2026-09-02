@@ -57,6 +57,7 @@ export default function SkuQuantityEditor({
   onTermChange,
   onDraftActivityChange,
   allowHaLicenseRatio = false,
+  generationHoldReason = '',
 }) {
   const values = withDefaultPairedLicenseIntents(Array.isArray(rows) ? rows : [], { allowHaLicenseRatio });
   const validation = normalizeSkuEditorRows(values);
@@ -97,7 +98,8 @@ export default function SkuQuantityEditor({
       ...(term === undefined ? {} : { term: effectiveTerm }),
     },
   );
-  const updateBlocked = draftActive || !validation.ok || routeBlocked || !preflight.ok;
+  const mixedTermHold = String(generationHoldReason || '').trim();
+  const updateBlocked = draftActive || !validation.ok || routeBlocked || !preflight.ok || Boolean(mixedTermHold);
 
   useEffect(() => {
     onDraftActivityChange?.(draftActive);
@@ -303,7 +305,9 @@ export default function SkuQuantityEditor({
 
   const readiness = draftActive
     ? { kind: 'blocked', message: 'Finish or cancel the product edit before generating. The previous SKU is not submitted while a draft is open.' }
-    : !validation.ok
+    : mixedTermHold
+      ? { kind: 'blocked', message: mixedTermHold }
+      : !validation.ok
       ? { kind: 'blocked', message: validation.error }
       : routeBlocked
         ? { kind: 'blocked', message: `eCommerce availability is unknown for ${route.unknownSkus.join(', ')}. Retry the check before generating.` }
