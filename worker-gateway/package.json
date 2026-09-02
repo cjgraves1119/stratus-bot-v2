@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "description": "Stratus AI Gateway - Gemma-first waterfall routing to main worker",
   "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test-lead-time-2026-09-02.mjs"
+  },
   "devDependencies": {
     "wrangler": "^3.0.0"
   }

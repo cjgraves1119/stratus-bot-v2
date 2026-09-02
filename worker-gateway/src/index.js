@@ -15,6 +15,8 @@
  * Rollback = flip client API_BASE back to the main worker URL.
  */
 
+import { dispatchLeadTimeRoutes } from './lead-time.js';
+
 const MAIN_WORKER_PATH = '/api/chat-waterfall';
 
 // ─── CORS ────────────────────────────────────────────────────────────────
@@ -213,8 +215,12 @@ export default {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
 
-    // Health check
-    if (request.method === 'GET' && (pathname === '/' || pathname === '/health')) {
+    // Lead-time + webhook routes (before /api/* passthrough so /api/lead-time is not forwarded).
+    const leadTimeHandled = await dispatchLeadTimeRoutes(request, env);
+    if (leadTimeHandled) return leadTimeHandled;
+
+    // Health check for GET /  (GET /health is handled above and includes ok: true)
+    if (request.method === 'GET' && pathname === '/') {
       return jsonResponse({
         status: 'Stratus AI Gateway running',
         version: env.GATEWAY_VERSION || '1.0.0',
@@ -285,7 +291,7 @@ export default {
     // that live on the main worker. Forward them as-is so clients can point
     // their entire API_BASE at the gateway. Only /api/chat gets the waterfall;
     // everything else is pass-through with zero modification.
-    if (pathname.startsWith('/api/') && pathname !== '/api/chat') {
+    if (pathname.startsWith('/api/') && pathname !== '/api/chat' && pathname !== '/api/lead-time') {
       // Same API-key gate on passthrough routes, with one carve-out for
       // same-account Workers calling in over a SERVICE BINDING.
       //
