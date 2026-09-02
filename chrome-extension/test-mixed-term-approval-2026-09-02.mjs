@@ -70,11 +70,14 @@ test('uniform-term carts do not require the mixed-term approval gate', () => {
 test('QuoteResult and SkuQuantityEditor wire the mixed-term flag and approval gate', () => {
   const quoteResult = readFileSync(new URL('./src/sidebar/components/QuoteResult.jsx', import.meta.url), 'utf8');
   const editor = readFileSync(new URL('./src/sidebar/components/SkuQuantityEditor.jsx', import.meta.url), 'utf8');
+  const helper = readFileSync(new URL('./src/lib/mixed-term-approval.mjs', import.meta.url), 'utf8');
   assert.match(quoteResult, /mixedTermApprovalState/);
   assert.match(quoteResult, /mixed-term-flag/);
   assert.match(quoteResult, /Approve mixed 1\/3\/5-year terms/);
   assert.match(quoteResult, /mixedTermBlocksActions/);
   assert.match(quoteResult, /canStartZohoReview/);
+  assert.match(quoteResult, /generationHoldReason=\{mixedTerm\.requiresApproval \? mixedTerm\.message/);
+  assert.match(helper, /Mixed 1\/3\/5-year license terms require explicit approval/);
   assert.match(editor, /generationHoldReason/);
-  assert.match(editor, /Mixed 1\/3\/5-year license terms require explicit approval/);
+  assert.match(editor, /mixedTermHold/);
 });

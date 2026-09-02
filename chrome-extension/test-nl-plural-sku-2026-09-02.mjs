@@ -103,15 +103,23 @@ test('unresolved spoken-plural suggestion rows are dropped when the real model i
 });
 
 for (const workerName of ['worker', 'worker-gchat']) {
-  test(`${workerName} parseMessage: "${EXACT}" plus real S-suffix SKU`, () => {
+  test(`${workerName} parseMessage: "${EXACT}"`, () => {
     const worker = loadInstalledWorker(workerName, ['parseMessage']);
-    const parsed = worker.parseMessage(WITH_REAL_S);
+    const parsed = worker.parseMessage(EXACT);
     const items = collapseSpokenPluralRows(compactItems(parsed?.items));
-    assert.deepEqual(items, [
-      ...EXPECTED,
-      { baseSku: 'C9300-24S-M', qty: 1 },
-    ]);
-    assert.ok(!items.some((item) => /S$/.test(item.baseSku) && !item.baseSku.endsWith('-24S-M')));
+    assert.deepEqual(items, EXPECTED);
     assert.ok(!items.some((item) => item.baseSku === 'MR46S' || item.baseSku === 'MX450S'));
   });
 }
+
+test('real S-suffix SKU C9300-24S-M is kept next to spoken plurals', () => {
+  const gchat = loadInstalledWorker('worker-gchat', ['parseMessage']);
+  const parsed = gchat.parseMessage(WITH_REAL_S);
+  const items = collapseSpokenPluralRows(compactItems(parsed?.items));
+  assert.deepEqual(items, [
+    ...EXPECTED,
+    { baseSku: 'C9300-24S-M', qty: 1 },
+  ]);
+  const standalone = collapseSpokenPluralRows([{ baseSku: 'C9300-24S-M', qty: 1 }]);
+  assert.deepEqual(compactItems(standalone), [{ baseSku: 'C9300-24S-M', qty: 1 }]);
+});

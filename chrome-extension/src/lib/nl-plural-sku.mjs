@@ -60,12 +60,15 @@ export function collapseSpokenPluralRows(rows) {
   const list = Array.isArray(rows) ? rows : [];
   const known = new Set(list.map(rowSku).filter(Boolean));
   const isKnown = (candidate) => known.has(candidate) && !looksLikeEnglishPluralSku(candidate);
+  const rawSkus = list.map(rowSku);
   const out = [];
   const indexBySku = new Map();
   for (const row of list) {
     const raw = rowSku(row);
     if (!raw) continue;
     const sku = canonicalizeSpokenSku(raw, isKnown);
+    // Spoken-plural leftovers (MR46S beside MR46) are the same mention, not extra qty.
+    if (looksLikeEnglishPluralSku(raw) && raw !== sku && rawSkus.includes(sku)) continue;
     if (indexBySku.has(sku)) {
       const existing = out[indexBySku.get(sku)];
       existing.qty = (Number(existing.qty) || 1) + (Number(row?.qty) || 1);
