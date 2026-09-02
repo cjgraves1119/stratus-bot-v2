@@ -4716,9 +4716,14 @@ async function lookupActiveEcommSkus(skus, env, { signal } = {}) {
     // fall back to `unknown` even though the same WooProducts row was readable
     // through the established live-pricing path.
     const criteria = clauses.length === 1 ? clauses[0] : `(${clauses.join('or')})`;
+    const encodedCriteria = clauses.length === 1
+      // Match fetchEcommPriceByExactCode's proven Zoho request shape: keep
+      // criteria grammar literal and encode only the caller-controlled value.
+      ? `(WooProduct_Code:equals:${encodeURIComponent(batch[0])})`
+      : encodeURIComponent(criteria);
     const response = await zohoApiCall(
       'GET',
-      `WooProducts/search?criteria=${encodeURIComponent(criteria)}&fields=WooProduct_Code,Stratus_Price,Inactive&per_page=200`,
+      `WooProducts/search?criteria=${encodedCriteria}&fields=WooProduct_Code,Stratus_Price,Inactive&per_page=200`,
       env,
       null,
       { signal },
@@ -4863,7 +4868,7 @@ async function searchActiveProducts(query, env, { deadlineMs = PRODUCT_SEARCH_DE
         let availabilityTimer = null;
         const availabilityRead = lookupActiveEcommSkus([...bySku.keys()], env, { signal: availabilityController.signal })
           .catch((error) => {
-            const code = String(error?.name || error?.code || error?.message || 'request_failed').slice(0, 120);
+            const code = String(error?.message || error?.code || error?.name || 'request_failed').slice(0, 120);
             console.warn(`[PRODUCT_SEARCH] Woo availability read unavailable (${code})`);
             return null;
           });

@@ -212,6 +212,11 @@ function classification(result) {
       '(WooProduct_Code:equals:ZZ-STAGED-01)',
       'an exact retry must use the same single-wrapper criterion as the working live-pricing path',
     );
+    assert.match(
+      calls.all[1].url,
+      /criteria=\(WooProduct_Code:equals:ZZ-STAGED-01\)/,
+      'the exact request must keep Zoho criteria grammar literal and encode only the SKU value',
+    );
   });
 
   await test('the deadline option is capped so both budgets together stay under 2x PRODUCT_SEARCH_DEADLINE_MS', () => {
