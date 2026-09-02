@@ -68,3 +68,178 @@ a:hover {
 ::selection {
   background: #1a73a733;
 }
+
+/* Quote editor: one shared column contract keeps unlike product rows aligned. */
+.sku-editor-grid {
+  display: grid;
+  grid-template-columns: minmax(170px, 2fr) 64px minmax(126px, 1fr) 96px minmax(132px, 1fr) 84px;
+  gap: 6px;
+  align-items: start;
+  min-width: 0;
+}
+
+.sku-editor-grid-header {
+  padding: 0 0 4px;
+  border-bottom: 1px solid #dadce0;
+  color: #5f6368;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .4px;
+  text-transform: uppercase;
+}
+
+.sku-editor-group { margin: 0 0 8px; }
+.sku-editor-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 8px 0 4px;
+  color: #5f6368;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .45px;
+  text-transform: uppercase;
+}
+.sku-editor-group-count { font-weight: 500; letter-spacing: 0; }
+.sku-editor-row-wrap { position: relative; margin-bottom: 6px; }
+.sku-editor-row {
+  padding: 5px 0;
+  border-bottom: 1px solid #eef0f2;
+}
+.sku-editor-cell { min-width: 0; }
+.sku-editor-cell::before { display: none; }
+
+.sku-editor-product-list {
+  position: absolute;
+  z-index: 30;
+  left: 0;
+  right: 0;
+  top: 100%;
+  max-height: 190px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #dadce0;
+  border-radius: 5px;
+  box-shadow: 0 3px 8px rgba(0,0,0,.16);
+}
+.sku-editor-product-option {
+  display: block;
+  width: 100%;
+  padding: 6px 7px;
+  border: none;
+  border-bottom: 1px solid #dadce0;
+  color: #202124;
+  cursor: pointer;
+  font-size: 10px;
+  text-align: left;
+}
+.sku-editor-product-option span {
+  display: block;
+  margin-top: 1px;
+  color: #5f6368;
+}
+.sku-editor-product-message { padding: 6px; color: #5f6368; font-size: 10px; }
+.sku-editor-readonly {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  padding: 0 6px;
+  border: 1px solid #e5e7ea;
+  border-radius: 5px;
+  background: #f8f9fa;
+  color: #5f6368;
+  font-size: 10px;
+}
+.sku-editor-standalone { color: #1a73a7; }
+.sku-editor-actions { display: flex; gap: 3px; justify-content: flex-end; }
+.sku-editor-actions button {
+  width: 26px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid #dadce0;
+  border-radius: 5px;
+  background: transparent;
+  color: #5f6368;
+  cursor: pointer;
+}
+.sku-editor-actions button:disabled { cursor: default; opacity: .35; }
+.sku-editor-actions .sku-editor-remove { color: #c5221f; font-size: 17px; }
+.sku-editor-row-detail {
+  grid-column: 1 / -1;
+  margin-top: -1px;
+  padding-left: 3px;
+  font-size: 9px;
+  line-height: 1.35;
+}
+.sku-editor-retry {
+  margin-left: 4px;
+  padding: 1px 6px;
+  border: 1px solid #1a73a7;
+  border-radius: 4px;
+  background: transparent;
+  color: #1a73a7;
+  font-size: 9px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.sku-editor-footer { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.sku-editor-footer > button {
+  padding: 5px 9px;
+  border: 1px solid #1a73a7;
+  border-radius: 5px;
+  background: transparent;
+  color: #1a73a7;
+  cursor: pointer;
+  font-size: 10px;
+}
+.sku-editor-footer > button:disabled { cursor: default; opacity: .55; }
+.sku-editor-footer > .sku-editor-primary {
+  border-color: #1a73a7;
+  background: #1a73a7;
+  color: #fff;
+  font-weight: 700;
+}
+.sku-editor-footer > .sku-editor-primary:disabled { border-color: #9aa0a6; background: #9aa0a6; }
+.sku-editor-readiness {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  font-size: 10px;
+  line-height: 1.35;
+}
+.sku-editor-readiness-blocked { background: #fce8e6; color: #c5221f; }
+.sku-editor-readiness-checking,
+.sku-editor-readiness-dirty,
+.sku-editor-readiness-zoho { background: #fef7e0; color: #8a6100; }
+.sku-editor-readiness-ready { background: #e6f4ea; color: #188038; }
+.sku-editor-parent-status { margin-top: 5px; color: #5f6368; font-size: 10px; }
+
+@media (max-width: 760px) {
+  .sku-editor-grid-header { display: none; }
+  .sku-editor-row {
+    grid-template-columns: minmax(0, 1fr) minmax(96px, .7fr);
+    grid-template-areas:
+      "product product"
+      "qty tier"
+      "term use"
+      "actions actions";
+    padding: 7px 0;
+  }
+  .sku-editor-product { grid-area: product; }
+  .sku-editor-qty { grid-area: qty; }
+  .sku-editor-tier { grid-area: tier; }
+  .sku-editor-term { grid-area: term; }
+  .sku-editor-use { grid-area: use; }
+  .sku-editor-actions { grid-area: actions; justify-content: flex-end; }
+  .sku-editor-cell::before {
+    display: block;
+    margin: 0 0 2px;
+    color: #5f6368;
+    content: attr(data-label);
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: .3px;
+    text-transform: uppercase;
+  }
+  .sku-editor-row-detail { grid-column: 1 / -1; }
+}

@@ -89,6 +89,20 @@ export function blankQuoteEditorRows() {
   return [{ sku: '', qty: 1, unresolved: false }];
 }
 
+/** A deliberately separate row for an additive licence renewal. */
+export function blankStandaloneRenewalRow() {
+  return {
+    sku: '',
+    qty: 1,
+    unresolved: false,
+    licenseIntent: 'standalone',
+    // Editor-only purpose. Normalization deliberately drops this field, but it
+    // keeps a blank renewal row in the right section and prevents a hardware
+    // result from silently changing the meaning of the dedicated add action.
+    editorPurpose: 'standalone',
+  };
+}
+
 /** True only after the rep has entered at least one SKU. Quantities alone do not count. */
 export function quoteEditorHasSkuInput(rows) {
   return (Array.isArray(rows) ? rows : []).some((row) => String(row?.sku || '').trim() !== '');
@@ -131,6 +145,60 @@ export function quoteEditorRowsFromIntake(lines, intent = {}) {
   return editableRowsFromResult({ parsed });
 }
 
+/**
+ * Row-level storefront routing evidence.
+ *
+ *   'ecomm'     exact active Product_Code proven on the eCommerce storefront
+ *   'zoho_only' exact active Product proven absent from the storefront
+ *   'unknown'   an active live Zoho product the rep selected or committed whose
+ *               storefront classification has not been proven yet. The search
+ *               source travels with it as evidence of that selection.
+ *   ''          no proof at all: typed rows, restored rows, derived paired
+ *               projections. The Worker still validates these on rebuild.
+ *
+ * A bare 'unknown' without a source is legacy typed-row state and means "no
+ * proof", exactly like an absent value. Unknown is never promoted to either
+ * proven state here; only a fresh exact search result may do that.
+ */
+export function rowAvailabilityState(row) {
+  const availability = String(row?.availability || '').trim().toLowerCase();
+  if (availability === 'ecomm' || availability === 'zoho_only') return availability;
+  if (availability === 'unknown' && String(row?.productSource || '').trim()) return 'unknown';
+  return '';
+}
+
+function mergeAvailabilityStates(a, b) {
+  if (a === b) return a;
+  // An unresolved selection blocks the whole merged row until it is retried.
+  if (a === 'unknown' || b === 'unknown') return 'unknown';
+  // One proof that the SKU is absent from the storefront routes it via Zoho.
+  if (a === 'zoho_only' || b === 'zoho_only') return 'zoho_only';
+  // eCommerce proof beside an unproven duplicate cannot claim eCommerce.
+  return '';
+}
+
+/**
+ * Fail-closed routing matrix for a cart:
+ *   every row proven eCommerce (or unproven)  -> 'ecomm'     regular quote
+ *   any row proven Zoho-only                  -> 'zoho_only' whole-cart Zoho review
+ *   any selected row still unknown            -> 'blocked'   no link, no Zoho, no CRM
+ * The Worker remains authoritative for the final SKU set; this only decides
+ * which client action is allowed to start.
+ */
+export function quoteRouteForRows(rows) {
+  const unknownSkus = [];
+  const zohoOnlySkus = [];
+  for (const row of (Array.isArray(rows) ? rows : [])) {
+    const sku = String(row?.sku || '').trim().toUpperCase();
+    if (!sku) continue;
+    const state = rowAvailabilityState(row);
+    if (state === 'unknown' && !unknownSkus.includes(sku)) unknownSkus.push(sku);
+    else if (state === 'zoho_only' && !zohoOnlySkus.includes(sku)) zohoOnlySkus.push(sku);
+  }
+  const route = unknownSkus.length ? 'blocked' : (zohoOnlySkus.length ? 'zoho_only' : 'ecomm');
+  return { route, unknownSkus, zohoOnlySkus };
+}
+
 /** Adapt the canonical strict line validator to the editor's `{ rows }` shape. */
 export function normalizeSkuEditorRows(rows) {
   // Run the shared validator over the complete list first. Besides validating
@@ -164,29 +232,32 @@ export function normalizeSkuEditorRows(rows) {
     // A paired and a standalone copy of the same catalogue license have
     // different commercial meaning. Keep them as distinct editable rows.
     const key = `${sku}\u0000${tier}\u0000${licenseIntent}`;
-    const rawAvailability = String(row?.availability || '').trim().toLowerCase();
-    const availability = ['ecomm', 'zoho_only'].includes(rawAvailability) ? rawAvailability : 'unknown';
+    const availability = rowAvailabilityState(row);
+    const productSource = String(row?.productSource || '').trim();
     const existing = grouped.get(key);
     if (existing) {
       existing.qty += qty;
-      // Conservative merge: one proof that a duplicate SKU is absent from the
-      // storefront routes the combined row through Zoho. Conflicting or absent
-      // proofs remain unknown and can never claim eCommerce availability.
-      const existingAvailability = existing.availability || 'unknown';
-      if (existingAvailability !== availability) {
-        const mergedAvailability = existingAvailability === 'zoho_only' || availability === 'zoho_only'
-          ? 'zoho_only'
-          : 'unknown';
-        if (mergedAvailability === 'unknown') delete existing.availability;
-        else existing.availability = mergedAvailability;
-      }
+      // Conservative merge: an unresolved selection blocks the merged row; one
+      // proof that a duplicate SKU is absent from the storefront routes the
+      // combined row through Zoho; anything else can never claim eCommerce.
+      const merged = mergeAvailabilityStates(rowAvailabilityState(existing), availability);
+      if (merged) existing.availability = merged;
+      else delete existing.availability;
+      if (!existing.productSource && productSource) existing.productSource = productSource;
     } else {
       grouped.set(key, {
         sku,
         qty,
         ...(tier ? { tier } : {}),
         ...(licenseIntent ? { licenseIntent } : {}),
-        ...(availability !== 'unknown' ? { availability } : {}),
+        ...(availability ? { availability } : {}),
+        // The search source is the evidence behind an explicit unknown and is
+        // kept for proven rows too so a rebuild can show where the proof came
+        // from. It is metadata only; the Worker never receives it as a claim.
+        ...(productSource ? { productSource } : {}),
+        // A locally re-targeted projection stays marked so direct serialization
+        // can refuse to publish it as if the Worker had derived it.
+        ...(licenseIntent === 'paired' && row?.projectionPending === true ? { projectionPending: true } : {}),
       });
     }
   }
@@ -227,7 +298,7 @@ export function normalizeSkuEditorRows(rows) {
  * every occurrence of the unresolved input while retaining quantities and all
  * unrelated rows; `stack` is the explicit add-another-item action.
  */
-export function applySkuSuggestion(rows, suggestion, mode = 'apply') {
+export function applySkuSuggestion(rows, suggestion, mode = 'apply', { allowHaLicenseRatio = false } = {}) {
   const current = Array.isArray(rows) ? rows.map((row) => ({ ...row })) : [];
   const input = String(suggestion?.input || '').trim().toUpperCase();
   const replacement = String(suggestion?.suggest?.[0] || '').trim().toUpperCase();
@@ -238,14 +309,177 @@ export function applySkuSuggestion(rows, suggestion, mode = 'apply') {
     return current;
   }
 
+  const warmSpareScopes = warmSpareCoverageKeys(licensePairReviewForRows(current, { allowHaLicenseRatio }));
   let replaced = false;
+  const orphanCoverageKeys = new Set();
   const next = current.map((row) => {
     if (String(row?.sku || '').trim().toUpperCase() !== input) return row;
     replaced = true;
-    return { ...row, sku: replacement, unresolved: false };
+    const changedIdentity = input !== replacement;
+    if (changedIdentity
+        && (row?.editorPurpose === 'standalone' || row?.licenseIntent === 'standalone')
+        && !replacement.startsWith('LIC-')
+        && !isSyntheticAgnosticSku(replacement)) return row;
+    const updated = { ...row, sku: replacement, unresolved: false };
+    if (changedIdentity) {
+      // A suggestion proves spelling only. Availability belongs to the old
+      // identity and must never transfer to the replacement SKU.
+      delete updated.availability;
+      delete updated.productSource;
+      delete updated.pairedSuspended;
+      delete updated.projectionPending;
+      delete updated.tierBeforeHardwareOnly;
+      const previousPolicy = quoteLicensePolicyFamilyForSku(input);
+      const nextPolicy = quoteLicensePolicyFamilyForSku(replacement);
+      const selectedTier = String(updated?.tier || '').trim().toLowerCase();
+      const supportedTier = licenseTierOptionsForSku(replacement).some((option) => option.value === selectedTier);
+      if (replacement.startsWith('LIC-') || previousPolicy !== nextPolicy || !supportedTier) delete updated.tier;
+      const previousCoverage = input.startsWith('LIC-') ? '' : quoteLicenseCoverageKeyForSku(input);
+      const nextCoverage = replacement.startsWith('LIC-') ? '' : quoteLicenseCoverageKeyForSku(replacement);
+      if (previousCoverage && previousCoverage !== nextCoverage) orphanCoverageKeys.add(previousCoverage);
+      if (updated.licenseIntent === 'paired'
+          && quoteLicenseCoverageKeyForSku(input) !== quoteLicenseCoverageKeyForSku(replacement)) {
+        delete updated.licenseIntent;
+      }
+    }
+    return updated;
   });
   if (!replaced) next.push({ sku: replacement, qty: Number(suggestion?.qty) || 1, unresolved: false });
-  return next;
+  return reconcileLinkedQuoteRows(next, { allowHaLicenseRatio, warmSpareScopes, orphanCoverageKeys });
+}
+
+/**
+ * The exact active product a search response proves for one SKU, reduced to
+ * the routing evidence the editor stores. Anything a live Zoho row did not
+ * classify stays 'unknown'; nothing here may promote it.
+ */
+export function exactProductSearchMatch(searchResponse, rawSku) {
+  const sku = String(rawSku || '').trim().toUpperCase();
+  if (!sku || searchResponse?.ok !== true || !Array.isArray(searchResponse.results)) return null;
+  const match = searchResponse.results.find((product) => (
+    String(product?.sku || '').trim().toUpperCase() === sku && product?.active !== false
+  ));
+  if (!match) return null;
+  const availability = String(match.availability || '').trim().toLowerCase();
+  return {
+    sku,
+    availability: availability === 'ecomm' || availability === 'zoho_only' ? availability : 'unknown',
+    source: String(match.source || '').trim() || 'zoho',
+  };
+}
+
+/**
+ * Commit the combobox draft for one row. Typing never reaches the reducer;
+ * only this commit (Enter, leaving the field, or a picked result) changes the
+ * canonical SKU, so a row cannot regroup or reorder mid-keystroke.
+ *
+ * A retyped identity drops the previous availability proof. If the current
+ * search response proves the exact typed SKU, that proof (including a still
+ * unknown storefront status) is adopted so manual exact entry is routed with
+ * the same fail-closed rule as a picked result.
+ */
+export function commitQuoteEditorSkuDraft(rows, index, draftText, searchResponse = null, { allowHaLicenseRatio = false } = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  const sku = String(draftText || '').trim().toUpperCase();
+  if (!list[index]) return { ok: false, changed: false, rows: list, sku, error: 'That row no longer exists.' };
+  const standalonePurpose = list[index]?.editorPurpose === 'standalone';
+  const preserveStandalone = standalonePurpose || list[index]?.licenseIntent === 'standalone';
+  const current = String(list[index]?.sku || '').trim().toUpperCase();
+  if (sku === '') {
+    if (current === '') return { ok: true, changed: false, rows: list, sku };
+    return {
+      ok: true,
+      changed: true,
+      sku,
+      rows: applyLinkedQuoteRowPatch(list, index, {
+        sku: '', unresolved: false, availability: undefined, productSource: undefined,
+      }, { allowHaLicenseRatio }),
+    };
+  }
+  if (!SAFE_SKU.test(sku)) {
+    return { ok: false, changed: false, rows: list, sku, error: 'Enter a valid 2-80 character SKU (letters, numbers, . _ / -).' };
+  }
+  if (preserveStandalone && !sku.startsWith('LIC-') && !isSyntheticAgnosticSku(sku)) {
+    return {
+      ok: false,
+      changed: false,
+      rows: list,
+      sku,
+      error: 'A standalone renewal must use a license SKU beginning with LIC-. Use Add product for hardware.',
+    };
+  }
+  const exact = exactProductSearchMatch(searchResponse, sku);
+  // Even a same-SKU retype is an explicit commit. Without proof from the
+  // current search request it must fail closed instead of inheriting either a
+  // restored no-proof state or an older SKU-bound availability decision.
+  return {
+    ok: true,
+    changed: true,
+    sku,
+    exact,
+    rows: applyLinkedQuoteRowPatch(list, index, {
+      sku,
+      unresolved: false,
+      // A changed identity without current exact evidence is selected-but-
+      // unclassified, not ordinary catalog input. Mark it synchronously so an
+      // async lookup failure can never expose Generate against stale eCommerce
+      // assumptions in the render between commit and the retry response.
+      availability: exact ? exact.availability : 'unknown',
+      productSource: exact ? exact.source : 'manual',
+      ...(preserveStandalone ? { licenseIntent: 'standalone' } : {}),
+    }, { allowHaLicenseRatio }),
+  };
+}
+
+/** Apply a picked search result to a row; an unknown storefront status is kept, never guessed. */
+export function selectQuoteEditorProduct(rows, index, product, { allowHaLicenseRatio = false } = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  const sku = String(product?.sku || '').trim().toUpperCase();
+  if (!list[index] || !SAFE_SKU.test(sku)) return list;
+  const preserveStandalone = list[index]?.editorPurpose === 'standalone'
+    || list[index]?.licenseIntent === 'standalone';
+  if (preserveStandalone && !sku.startsWith('LIC-') && !isSyntheticAgnosticSku(sku)) return list;
+  const availability = String(product?.availability || '').trim().toLowerCase();
+  return applyLinkedQuoteRowPatch(list, index, {
+    sku,
+    unresolved: false,
+    availability: availability === 'ecomm' || availability === 'zoho_only' ? availability : 'unknown',
+    productSource: String(product?.source || '').trim() || 'zoho',
+    ...(preserveStandalone ? { licenseIntent: 'standalone' } : {}),
+  }, { allowHaLicenseRatio });
+}
+
+/**
+ * Resolve a row's storefront status from a fresh exact search. Only rows that
+ * are unknown or carry no proof are candidates, located by SKU as well as
+ * index so a late response cannot stamp a proof onto a row whose identity
+ * changed while the check was in flight. A typed SKU that the exact search
+ * finds as an active live product adopts its status, including a still
+ * unknown one, so manual entry is routed with the same fail-closed rule.
+ * Rows that already hold a proof, and SKUs the exact search does not know,
+ * are left untouched for the Worker to validate.
+ */
+export function resolveRowAvailabilityFromSearch(rows, index, rawSku, searchResponse) {
+  const list = Array.isArray(rows) ? rows : [];
+  const sku = String(rawSku || '').trim().toUpperCase();
+  const isTarget = (row) => String(row?.sku || '').trim().toUpperCase() === sku
+    && ['unknown', ''].includes(rowAvailabilityState(row));
+  const target = isTarget(list[index]) ? index : list.findIndex(isTarget);
+  if (target < 0) return { changed: false, rows: list, availability: '', index: -1 };
+  const previous = rowAvailabilityState(list[target]);
+  const exact = exactProductSearchMatch(searchResponse, sku);
+  if (!exact) return { changed: false, rows: list, availability: previous, index: target };
+  const next = { ...list[target], availability: exact.availability, productSource: exact.source };
+  if (rowAvailabilityState(next) === previous
+      && String(next.productSource || '') === String(list[target]?.productSource || '')) {
+    return { changed: false, rows: list, availability: previous, index: target };
+  }
+  return {
+    changed: true,
+    availability: exact.availability,
+    index: target,
+    rows: list.map((row, rowIndex) => (rowIndex === target ? next : { ...row })),
+  };
 }
 
 /**
@@ -273,9 +507,62 @@ export const LICENSE_TIER_OPTIONS = [
   { value: 'none', label: 'None (hardware only)', modifier: null },
 ];
 
+/** One quote-wide term selector; blank deliberately means the standard matrix. */
+export const QUOTE_TERM_OPTIONS = [
+  { value: '', label: 'All standard (1/3/5)' },
+  { value: '1', label: '1 year' },
+  { value: '3', label: '3 years' },
+  { value: '5', label: '5 years' },
+];
+
 /** True when a row was set to the per-line "None (hardware only)" option. */
 export function rowIsHardwareOnly(row) {
   return String(row?.tier || '').trim().toLowerCase() === 'none';
+}
+
+/** Hardware owns the paired-vs-bare choice; accessories and licenses do not. */
+export function quoteEditorHardwareLicenseUse(row) {
+  const sku = String(row?.sku || '').trim().toUpperCase();
+  if (!sku || sku.startsWith('LIC-') || !quoteLicensePolicyFamilyForSku(sku)) return '';
+  return rowIsHardwareOnly(row) ? 'hardware_only' : 'paired';
+}
+
+/**
+ * Apply the hardware-owned licence-use control without losing an explicit tier.
+ * The remembered tier is editor metadata and is dropped by normalization.
+ */
+export function applyQuoteEditorHardwareLicenseUse(rows, index, use, { allowHaLicenseRatio = false } = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  const row = list[index];
+  if (!row || !quoteEditorHardwareLicenseUse(row)) return list.map((item) => ({ ...item }));
+  if (use === 'hardware_only') {
+    const tier = String(row?.tier || '').trim().toLowerCase();
+    return applyLinkedQuoteRowPatch(list, index, {
+      tier: 'none',
+      tierBeforeHardwareOnly: tier && tier !== 'none' ? tier : (row?.tierBeforeHardwareOnly || ''),
+    }, { allowHaLicenseRatio });
+  }
+  if (use === 'paired') {
+    if (!rowIsHardwareOnly(row)) return list.map((item) => ({ ...item }));
+    const policyFamily = quoteLicensePolicyFamilyForSku(row?.sku);
+    const activeFamilyRows = list.filter((candidate, candidateIndex) => (
+      candidateIndex !== index
+      && !/^LIC-/i.test(String(candidate?.sku || ''))
+      && !rowIsHardwareOnly(candidate)
+      && quoteLicensePolicyFamilyForSku(candidate?.sku) === policyFamily
+    ));
+    // A row returning from hardware-only joins the family's CURRENT reviewed
+    // edition. It must not roll active peers back to the tier remembered when
+    // this row was first parked as bare hardware.
+    const restore = activeFamilyRows.length
+      ? String(activeFamilyRows[0]?.tier || '').trim().toLowerCase()
+      : String(row?.tierBeforeHardwareOnly || '').trim().toLowerCase();
+    return applyLinkedQuoteRowPatch(list, index, {
+      tier: restore,
+      tierBeforeHardwareOnly: undefined,
+    }, { allowHaLicenseRatio });
+  }
+  return list.map((item) => ({ ...item }));
 }
 
 export function licenseTierModifier(value) {
@@ -482,6 +769,46 @@ export function deviceLicenseTierFromSku(sku) {
   return '';
 }
 
+/**
+ * The catalog licence a paired PROJECTION should show once its hardware moves
+ * to another edition, keeping the projection's own term. This mirrors the
+ * families deviceLicenseTierFromSku() already understands and nothing more:
+ * shared AP (LIC-ENT-*YR <-> LIC-MR-ADV-*Y), Catalyst/MS390 (E <-> A), MS130/
+ * MS150 (bare/CMPT <-> A/CMPTA) and MX/Z4/C8 appliances (ENT/SEC/SDW).
+ *
+ * It is a review view only. rowsForLinkedQuoteRebuild() still strips every
+ * projection so the Worker derives and aggregates the final licence line; an
+ * unrecognised shape returns '' and the projection is merely flagged pending.
+ */
+export function pairedLicenseSkuForTier(rawSku, tier) {
+  const sku = String(rawSku || '').trim().toUpperCase();
+  const edition = String(tier || '').trim().toLowerCase();
+  let match = sku.match(/^LIC-ENT-(10|[1357])YR$/) || sku.match(/^LIC-MR-ADV-(10|[1357])Y$/);
+  if (match) {
+    if (edition === 'enterprise') return `LIC-ENT-${match[1]}YR`;
+    if (edition === 'advanced') return `LIC-MR-ADV-${match[1]}Y`;
+    return '';
+  }
+  match = sku.match(/^(LIC-(?:C9\d{3}L?|MS390)-\d+)(A|E)(-\d+Y)$/);
+  if (match) {
+    if (edition === 'advanced') return `${match[1]}A${match[3]}`;
+    if (edition === 'standard') return `${match[1]}E${match[3]}`;
+    return '';
+  }
+  match = sku.match(/^(LIC-(?:MS130|MS150)-(?:CMPT|\d+))(A?)(-\d+Y)$/);
+  if (match) {
+    if (edition === 'advanced') return `${match[1]}A${match[3]}`;
+    if (edition === 'standard') return `${match[1]}${match[3]}`;
+    return '';
+  }
+  match = sku.match(/^(LIC-(?:MX\d+(?:CW?|W)?|Z4C?|C(?:8111|8121|8455))-)(?:ENT|SEC|SDW)(-(?:10|[1357])YR?)$/);
+  if (match) {
+    const token = { enterprise: 'ENT', security: 'SEC', sdwan: 'SDW' }[edition];
+    return token ? `${match[1]}${token}${match[2]}` : '';
+  }
+  return '';
+}
+
 /** Effective reviewed tier for hardware whose concrete licence can be paired. */
 export function effectivePairableHardwareTier(row) {
   const family = licenseFamilyForSku(row?.sku);
@@ -651,6 +978,19 @@ export function licensePairReviewForRows(rows, { allowHaLicenseRatio = false } =
     const identityMatches = hardwareGroups.filter((candidate) => candidate.coverageKey === coverageKey);
     const matches = identityMatches.filter((candidate) => candidate.tier === tier);
     if (matches.length === 1) matches[0].licenseIndexes.push(index);
+    else if (identityMatches.length > 0 && row?.licenseIntent === 'paired' && row?.projectionPending === true) {
+      // A projection the reducer could not re-target after a tier change is
+      // not a rep error to correct: it is waiting for the Worker rebuild that
+      // derives the licence at the new edition. Keep it visible and inert.
+      review[index] = {
+        kind: 'pending',
+        role: 'license',
+        licenseQty: reviewQuantity(row),
+        licenseSkus: uniqueReviewSkus(list, [index]),
+        tier,
+        coverageKey,
+      };
+    }
     else if (identityMatches.length > 0) unmatchedLicenseIndexes.add(index);
     else if (row?.licenseIntent === 'paired' && bareCoverageKeys.has(coverageKey)) {
       review[index] = {
@@ -760,6 +1100,10 @@ export function licensePairReviewForRows(rows, { allowHaLicenseRatio = false } =
  * unresolved and continue to fail closed.
  */
 export function withDefaultPairedLicenseIntents(rows, { allowHaLicenseRatio = false } = {}) {
+  return consolidatePairedLicenseProjections(defaultPairedLicenseIntents(rows, { allowHaLicenseRatio }));
+}
+
+function defaultPairedLicenseIntents(rows, { allowHaLicenseRatio = false } = {}) {
   const list = Array.isArray(rows) ? rows.map((row) => ({ ...row })) : [];
   const review = licensePairReviewForRows(list, { allowHaLicenseRatio });
   return list.map((row, index) => (
@@ -773,6 +1117,73 @@ export function withDefaultPairedLicenseIntents(rows, { allowHaLicenseRatio = fa
 
 function isPairedLicenseProjection(row) {
   return /^LIC-/i.test(String(row?.sku || '')) && row?.licenseIntent === 'paired';
+}
+
+/**
+ * Collapse only exact duplicate editor projections. These rows are a review
+ * view derived by the Worker and are stripped before rebuild, so this is not a
+ * second quote aggregation path. Standalone renewals and differing terms stay
+ * independent commercial lines.
+ */
+export function consolidatePairedLicenseProjections(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const out = [];
+  const byKey = new Map();
+  for (const source of list) {
+    const row = { ...source };
+    if (!isPairedLicenseProjection(row)) {
+      out.push(row);
+      continue;
+    }
+    const qty = reviewQuantity(row);
+    const key = pairedProjectionConsolidationKey(row);
+    if (!key || qty === null) {
+      out.push(row);
+      continue;
+    }
+    const existingIndex = byKey.get(key);
+    if (existingIndex == null) {
+      byKey.set(key, out.length);
+      out.push(row);
+      continue;
+    }
+    const existing = out[existingIndex];
+    existing.qty = (reviewQuantity(existing) || 0) + qty;
+    if (row?.projectionPending === true) existing.projectionPending = true;
+    if (row?.pairedSuspended === true) existing.pairedSuspended = true;
+  }
+  return out;
+}
+
+function pairedProjectionConsolidationKey(row) {
+  if (!isPairedLicenseProjection(row) || reviewQuantity(row) === null) return '';
+  const sku = String(row?.sku || '').trim().toUpperCase();
+  if (!sku) return '';
+  // A literal license SKU already binds its edition. Ignore stale hidden tier
+  // metadata so visually identical projections really do consolidate.
+  return [
+    sku,
+    rowAvailabilityState(row),
+    String(row?.productSource || '').trim(),
+  ].join('\u0000');
+}
+
+function consolidatedInputIndex(rows, targetIndex) {
+  if (!Array.isArray(rows) || !rows[targetIndex]) return -1;
+  const byKey = new Map();
+  let outputIndex = -1;
+  let mapped = -1;
+  rows.forEach((row, index) => {
+    const key = pairedProjectionConsolidationKey(row);
+    if (key && byKey.has(key)) {
+      if (index === targetIndex) mapped = byKey.get(key);
+      return;
+    }
+    outputIndex += 1;
+    if (key) byKey.set(key, outputIndex);
+    if (index === targetIndex) mapped = outputIndex;
+  });
+  return mapped;
 }
 
 /** Coverage keys whose paired review is currently a reviewed 2:1 warm-spare pair. */
@@ -864,6 +1275,29 @@ function reconcileLinkedQuoteRows(rows, {
       continue;
     }
 
+    // Hardware owns the licence edition. When every active covered device now
+    // sits on one tier that the projection no longer names (MR36 moved from
+    // Enterprise to Advanced), the projection follows it immediately as a
+    // pending review row: LIC-ENT-3YR becomes LIC-MR-ADV-3Y at the same term
+    // instead of lingering as a hard mismatch until the next rebuild. The
+    // Worker still derives the final licence when the cart is rebuilt.
+    const activeTiers = new Set(active
+      .map((index) => effectivePairableHardwareTier(next[index]))
+      .filter(Boolean));
+    if (activeTiers.size === 1) {
+      const [hardwareTier] = activeTiers;
+      linkedIndexes.forEach((index) => {
+        const row = next[index];
+        if (deviceLicenseTierFromSku(row.sku) === hardwareTier) return;
+        const retargeted = pairedLicenseSkuForTier(row.sku, hardwareTier);
+        next[index] = {
+          ...row,
+          ...(retargeted ? { sku: retargeted } : {}),
+          projectionPending: true,
+        };
+      });
+    }
+
     const hardwareQuantities = active.map((index) => reviewQuantity(next[index]));
     // While the rep is typing (for example clearing "2" before entering "3"),
     // keep the current projection intact. Validation disables Update until the
@@ -891,27 +1325,55 @@ function reconcileLinkedQuoteRows(rows, {
  * This reducer never resolves, derives, or aggregates a final license SKU.
  */
 export function applyLinkedQuoteRowPatch(rows, index, patch, { allowHaLicenseRatio = false } = {}) {
-  const base = withDefaultPairedLicenseIntents(rows, { allowHaLicenseRatio });
-  if (!base[index]) return base;
+  const defaulted = defaultPairedLicenseIntents(rows, { allowHaLicenseRatio });
+  const baseIndex = consolidatedInputIndex(defaulted, index);
+  const base = consolidatePairedLicenseProjections(defaulted);
+  if (!base[baseIndex]) return base;
   const warmSpareScopes = warmSpareCoverageKeys(licensePairReviewForRows(base, { allowHaLicenseRatio }));
-  let next = base.map((row, rowIndex) => (rowIndex === index ? { ...row, ...(patch || {}) } : { ...row }));
-
-  if (Object.prototype.hasOwnProperty.call(patch || {}, 'sku')
-      && !Object.prototype.hasOwnProperty.call(patch || {}, 'licenseIntent')) {
-    // A retyped SKU is a new identity: its prior license-use review no longer
-    // applies. The reducer re-derives the default from the fresh pairing.
-    delete next[index].licenseIntent;
-    delete next[index].pairedSuspended;
+  const previousSku = String(base[baseIndex]?.sku || '').trim().toUpperCase();
+  let next = base.map((row, rowIndex) => (rowIndex === baseIndex ? { ...row, ...(patch || {}) } : { ...row }));
+  // An `undefined` patch value clears the field (a retyped identity drops its
+  // availability proof) rather than leaving a dangling key on the row.
+  for (const key of Object.keys(patch || {})) {
+    if (patch[key] === undefined) delete next[baseIndex][key];
   }
-  if (patch?.licenseIntent === 'standalone') delete next[index].pairedSuspended;
 
-  const editedSku = String(next[index]?.sku || '').trim().toUpperCase();
+  const editedSku = String(next[baseIndex]?.sku || '').trim().toUpperCase();
+  const skuIdentityChanged = Object.prototype.hasOwnProperty.call(patch || {}, 'sku')
+    && editedSku !== previousSku;
+  const orphanCoverageKeys = new Set();
+  if (skuIdentityChanged) {
+    // Availability, pairing state and a pending projection prove facts about a
+    // specific product identity. A committed replacement cannot inherit them.
+    if (!Object.prototype.hasOwnProperty.call(patch || {}, 'availability')) delete next[baseIndex].availability;
+    if (!Object.prototype.hasOwnProperty.call(patch || {}, 'productSource')) delete next[baseIndex].productSource;
+    if (!Object.prototype.hasOwnProperty.call(patch || {}, 'licenseIntent')) delete next[baseIndex].licenseIntent;
+    delete next[baseIndex].pairedSuspended;
+    delete next[baseIndex].projectionPending;
+    delete next[baseIndex].tierBeforeHardwareOnly;
+
+    const previousPolicy = quoteLicensePolicyFamilyForSku(previousSku);
+    const nextPolicy = quoteLicensePolicyFamilyForSku(editedSku);
+    const selectedTier = String(next[baseIndex]?.tier || '').trim().toLowerCase();
+    const supportedTier = licenseTierOptionsForSku(editedSku).some((option) => option.value === selectedTier);
+    if (editedSku.startsWith('LIC-') || previousPolicy !== nextPolicy || !supportedTier) delete next[baseIndex].tier;
+
+    const previousCoverage = previousSku && !previousSku.startsWith('LIC-')
+      ? quoteLicenseCoverageKeyForSku(previousSku)
+      : '';
+    const nextCoverage = editedSku && !editedSku.startsWith('LIC-')
+      ? quoteLicenseCoverageKeyForSku(editedSku)
+      : '';
+    if (previousCoverage && previousCoverage !== nextCoverage) orphanCoverageKeys.add(previousCoverage);
+  }
+  if (patch?.licenseIntent === 'standalone') delete next[baseIndex].pairedSuspended;
+
   const hasTierPatch = Object.prototype.hasOwnProperty.call(patch || {}, 'tier') && !editedSku.startsWith('LIC-');
   if (hasTierPatch && String(patch?.tier || '').trim().toLowerCase() !== 'none') {
     const policyFamily = quoteLicensePolicyFamilyForSku(editedSku);
     if (policyFamily) {
       next = next.map((row, rowIndex) => {
-        if (rowIndex === index || rowIsHardwareOnly(row)) return row;
+        if (rowIndex === baseIndex || rowIsHardwareOnly(row) || /^LIC-/i.test(String(row?.sku || ''))) return row;
         return quoteLicensePolicyFamilyForSku(row?.sku) === policyFamily
           ? { ...row, tier: patch.tier }
           : row;
@@ -919,7 +1381,7 @@ export function applyLinkedQuoteRowPatch(rows, index, patch, { allowHaLicenseRat
     }
   }
 
-  return reconcileLinkedQuoteRows(next, { allowHaLicenseRatio, warmSpareScopes });
+  return reconcileLinkedQuoteRows(next, { allowHaLicenseRatio, warmSpareScopes, orphanCoverageKeys });
 }
 
 /**
@@ -930,16 +1392,18 @@ export function applyLinkedQuoteRowPatch(rows, index, patch, { allowHaLicenseRat
  * removed row's coverage scope are never modified.
  */
 export function removeLinkedQuoteRow(rows, index, { allowHaLicenseRatio = false } = {}) {
-  const base = withDefaultPairedLicenseIntents(rows, { allowHaLicenseRatio });
-  if (!base[index]) return base;
+  const defaulted = defaultPairedLicenseIntents(rows, { allowHaLicenseRatio });
+  const baseIndex = consolidatedInputIndex(defaulted, index);
+  const base = consolidatePairedLicenseProjections(defaulted);
+  if (!base[baseIndex]) return base;
   const warmSpareScopes = warmSpareCoverageKeys(licensePairReviewForRows(base, { allowHaLicenseRatio }));
-  const removedSku = String(base[index]?.sku || '').trim().toUpperCase();
+  const removedSku = String(base[baseIndex]?.sku || '').trim().toUpperCase();
   const orphanCoverageKeys = new Set();
   if (removedSku && !removedSku.startsWith('LIC-')) {
     const coverageKey = quoteLicenseCoverageKeyForSku(removedSku);
     if (coverageKey) orphanCoverageKeys.add(coverageKey);
   }
-  const next = base.filter((_, rowIndex) => rowIndex !== index);
+  const next = base.filter((_, rowIndex) => rowIndex !== baseIndex);
   return reconcileLinkedQuoteRows(next, { allowHaLicenseRatio, warmSpareScopes, orphanCoverageKeys });
 }
 
@@ -976,7 +1440,7 @@ export function retainPairedLicenseProjections(committedRows, editorRows) {
   const projections = (Array.isArray(editorRows) ? editorRows : [])
     .filter((row) => isPairedLicenseProjection(row))
     .map((row) => ({ ...row }));
-  return [...committed, ...projections];
+  return consolidatePairedLicenseProjections([...committed, ...projections]);
 }
 
 /**
@@ -1016,7 +1480,7 @@ export function withPairedLicenseProjections(committedRows, quoteLines, { allowH
     if (remaining > 0) candidates.push({ sku, qty: remaining, licenseIntent: 'paired', unresolved: false });
   }
   if (!candidates.length) return rows;
-  const combined = [...rows, ...candidates];
+  const combined = consolidatePairedLicenseProjections([...rows, ...candidates]);
   const review = licensePairReviewForRows(combined, { allowHaLicenseRatio });
   return combined.filter((row, index) => index < rows.length || review[index]?.kind === 'paired');
 }
@@ -1086,6 +1550,9 @@ export function oneshotSkusWithReviewedLicenseIntents(urlLines, committedRows) {
 
 function quoteEditorGroupDescriptor(row, pairing = {}) {
   const ownSku = String(row?.sku || '').trim().toUpperCase();
+  if (!ownSku && row?.editorPurpose === 'standalone') {
+    return { key: 'standalone-licenses', label: 'Standalone renewals', order: 80 };
+  }
   const pairedHardwareSku = pairing?.role === 'license' ? pairing?.hardwareSkus?.[0] : '';
   const sku = String(pairedHardwareSku || ownSku).trim().toUpperCase();
   const policyFamily = quoteLicensePolicyFamilyForSku(sku);
@@ -1106,6 +1573,17 @@ function quoteEditorGroupDescriptor(row, pairing = {}) {
   return { key: 'other', label: 'Other products', order: 90 };
 }
 
+/** Stable presentation role; canonical row order remains untouched. */
+export function quoteEditorPresentationRole(row, pairing = {}) {
+  const sku = String(row?.sku || '').trim().toUpperCase();
+  if (!sku.startsWith('LIC-') && !isSyntheticAgnosticSku(sku)) return 'product';
+  if (row?.licenseIntent === 'paired'
+      || (pairing?.role === 'license' && ['paired', 'pending', 'suspended'].includes(pairing?.kind))) {
+    return 'paired_license';
+  }
+  return 'standalone_license';
+}
+
 /**
  * Presentation-only grouping; entries retain their original row indexes.
  *
@@ -1123,11 +1601,19 @@ export function groupQuoteEditorRows(rows, pairReview = null) {
       groups.set(descriptor.key, { ...descriptor, entries: [], productCount: 0, pairedLicenseCount: 0 });
     }
     const group = groups.get(descriptor.key);
-    group.entries.push({ row, index });
+    group.entries.push({ row, index, role: quoteEditorPresentationRole(row, review[index]) });
     if (isPairedLicenseProjection(row)) group.pairedLicenseCount += 1;
     else group.productCount += 1;
   });
-  return [...groups.values()].sort((a, b) => a.order - b.order);
+  const roleOrder = { product: 0, paired_license: 1, standalone_license: 2 };
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      entries: [...group.entries].sort((a, b) => (
+        (roleOrder[a.role] ?? 9) - (roleOrder[b.role] ?? 9) || a.index - b.index
+      )),
+    }))
+    .sort((a, b) => a.order - b.order);
 }
 
 /**
@@ -1184,15 +1670,69 @@ export function sameDeviceIdentity(a, b) {
  * keeps the term the customer is being quoted instead of guessing one. Returns
  * null when the rows disagree or carry no term, so the caller can decide.
  */
+export function licenseTermFromSku(rawSku) {
+  const sku = String(rawSku || '').trim().toUpperCase();
+  if (!sku.startsWith('LIC-')) return '';
+  return (sku.match(/-(\d{1,2})YR?$/) || [])[1] || '';
+}
+
 export function termFromLicenseRows(rows) {
   const terms = new Set();
   for (const row of (Array.isArray(rows) ? rows : [])) {
-    const sku = String(row?.sku || '').toUpperCase();
-    if (!sku.startsWith('LIC-')) continue;
-    const match = sku.match(/-([135])YR?$/);
-    if (match) terms.add(match[1]);
+    const term = licenseTermFromSku(row?.sku);
+    if (term) terms.add(term);
   }
   return terms.size === 1 ? [...terms][0] : null;
+}
+
+/**
+ * Resolve the single term a direct Zoho review needs without inventing one.
+ * A reviewed dropdown selection wins; otherwise one concrete LIC-* suffix may
+ * supply the term. Mixed concrete terms and licensable hardware without either
+ * source fail closed. Accessories and rows explicitly set to hardware-only do
+ * not need a licence term at all.
+ */
+export function directZohoQuoteTerm(rows, requestedTerm = '') {
+  const requested = String(requestedTerm || '').trim();
+  if (requested) {
+    return ['1', '3', '5'].includes(requested)
+      ? { ok: true, term: requested, source: 'selected', error: '' }
+      : { ok: false, term: null, source: '', error: 'Choose 1, 3, or 5 years for this Zoho-only cart.' };
+  }
+
+  const list = Array.isArray(rows) ? rows : [];
+  const concreteTerms = new Set(list.map((row) => licenseTermFromSku(row?.sku)).filter(Boolean));
+  if (concreteTerms.size === 1) {
+    const inferred = [...concreteTerms][0];
+    return ['1', '3', '5'].includes(inferred)
+      ? { ok: true, term: inferred, source: 'license_sku', error: '' }
+      : { ok: false, term: null, source: '', error: `The ${inferred}-year license term is not supported by direct Zoho review.` };
+  }
+  if (concreteTerms.size > 1) {
+    return { ok: false, term: null, source: '', error: 'This Zoho-only cart contains mixed license terms. Choose one reviewed 1, 3, or 5 year term.' };
+  }
+
+  const needsDerivedLicense = list.some((row) => quoteEditorHardwareLicenseUse(row) === 'paired');
+  if (needsDerivedLicense) {
+    return {
+      ok: false,
+      term: null,
+      source: '',
+      error: 'Choose 1, 3, or 5 years for a Zoho-only cart. All standard creates multiple eCommerce options, but this direct Zoho review needs one reviewed term.',
+    };
+  }
+  return { ok: true, term: null, source: 'not_required', error: '' };
+}
+
+/** Concrete explicit license rows may not contradict a selected quote term. */
+export function quoteTermConflictForRows(rows, requestedTerm) {
+  const term = String(requestedTerm || '').trim();
+  if (!term) return null;
+  const conflicts = (Array.isArray(rows) ? rows : [])
+    .filter((row) => /^LIC-/i.test(String(row?.sku || '')) && row?.licenseIntent !== 'paired')
+    .map((row) => ({ sku: String(row.sku).trim().toUpperCase(), term: licenseTermFromSku(row.sku) }))
+    .filter((row) => row.term && row.term !== term);
+  return conflicts.length ? { requestedTerm: term, conflicts } : null;
 }
 
 /**
@@ -1314,6 +1854,18 @@ function syntheticAgnosticLines(rows) {
  */
 export function quoteTextFromEditorRows(rows, priorText = '', overrides = {}) {
   const rowList = Array.isArray(rows) ? rows : [];
+  const hasTermOverride = Object.prototype.hasOwnProperty.call(overrides || {}, 'term');
+  const termOverride = hasTermOverride ? String(overrides?.term ?? '').trim() : '';
+  if (hasTermOverride && termOverride && !['1', '3', '5'].includes(termOverride)) {
+    const message = 'Quote term must be All standard, 1 year, 3 years, or 5 years.';
+    return {
+      ok: false,
+      rows: [],
+      text: '',
+      error: message,
+      errors: [{ index: -1, code: 'invalid_quote_term', message }],
+    };
+  }
   const syntheticRows = rowList.filter((row) => isSyntheticAgnosticSku(row?.sku));
   const normalRows = rowList.filter((row) => !isSyntheticAgnosticSku(row?.sku));
 
@@ -1329,7 +1881,39 @@ export function quoteTextFromEditorRows(rows, priorText = '', overrides = {}) {
       return { ok: false, rows: [], text: '', error: editorNormalized.error, errors: editorNormalized.errors };
     }
     const lines = editorNormalized.rows.map(({ unresolved: _unresolved, ...line }) => line);
+    // A selected live product whose storefront classification is still unknown
+    // has no safe route: an eCommerce link could sell a Zoho-only product and a
+    // Zoho review could bypass the storefront. Nothing downstream may start
+    // until the exact availability check is retried and resolves.
+    const route = quoteRouteForRows(lines);
+    if (route.route === 'blocked') {
+      const message = `eCommerce availability is still unknown for ${route.unknownSkus.join(', ')}. Retry the availability check before generating; no link, Zoho review, or CRM write was started.`;
+      return {
+        ok: false,
+        rows: lines,
+        text: '',
+        error: message,
+        errors: [{ index: -1, code: 'availability_unknown', message }],
+      };
+    }
     const pairReview = licensePairReviewForRows(lines, { allowHaLicenseRatio: overrides?.haRequested === true });
+    // A pending projection is waiting for the Worker to derive the licence at
+    // the new hardware tier. Rebuild callers strip it beforehand; a direct
+    // caller must not publish a locally re-targeted licence as a final line.
+    const pendingProjection = lines.some((line, index) => (
+      /^LIC-/i.test(String(line?.sku || ''))
+      && line?.licenseIntent === 'paired'
+      && (line?.projectionPending === true || pairReview[index]?.kind === 'pending')
+    ));
+    if (pendingProjection) {
+      return {
+        ok: false,
+        rows: lines,
+        text: '',
+        error: 'A device-associated license is waiting to be rebuilt at the new hardware tier. Update the quote to derive it.',
+        errors: [{ index: -1, code: 'pending_paired_projection', message: 'A paired license projection must be rebuilt before it can be published.' }],
+      };
+    }
     const unresolvedPair = pairReview.some((entry) => entry.kind === 'needs_review');
     if (unresolvedPair) {
       return {
@@ -1405,9 +1989,22 @@ export function quoteTextFromEditorRows(rows, priorText = '', overrides = {}) {
   const inferred = quoteModeFromText(priorText);
   const hasTierOverride = Object.prototype.hasOwnProperty.call(overrides || {}, 'tier')
     && String(overrides.tier || '') !== '';
-  const mode = hasTierOverride
+  let mode = hasTierOverride
     ? { ...inferred, tier: licenseTierModifier(overrides.tier) }
     : inferred;
+  if (hasTermOverride) mode = { ...mode, term: termOverride || null };
+  const termConflict = quoteTermConflictForRows(normalized.lines, mode.term);
+  if (termConflict) {
+    const names = termConflict.conflicts.map(({ sku, term }) => `${sku} (${term}-year)`).join(', ');
+    const message = `${names} conflicts with the selected ${mode.term}-year quote term. Select All standard or choose a matching standalone license SKU.`;
+    return {
+      ok: false,
+      rows: normalized.lines,
+      text: '',
+      error: message,
+      errors: [{ index: -1, code: 'mixed_quote_term', message }],
+    };
+  }
   if (mode.hardwareOnly && normalized.lines.some((row) => row.sku.startsWith('LIC-'))) {
     return {
       ok: false,

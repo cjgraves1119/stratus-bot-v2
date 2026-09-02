@@ -36,11 +36,14 @@ import {
 import {
   applySkuSuggestion,
   blankQuoteEditorRows,
+  directZohoQuoteTerm,
   editableRowsFromResult,
   oneshotSkusFromCommittedRows,
   oneshotSkusWithReviewedLicenseIntents,
   quoteEditorHasSkuInput,
   quoteEditorRowsFromIntake,
+  quoteModeFromText,
+  quoteRouteForRows,
   quoteTextFromEditorRows,
   retainPairedLicenseProjections,
   rowsForLinkedQuoteRebuild,
@@ -1418,6 +1421,7 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
     }));
   });
   const [productDirty, setProductDirty] = useState(false);
+  const [productDraftActive, setProductDraftActive] = useState(false);
   const [productStatus, setProductStatus] = useState('');
   const quoteOptionsBound = !!oneshotProductSnapshotHash(p)
     && msg.quoteOptionsSnapshotHash === oneshotProductSnapshotHash(p);
@@ -1436,7 +1440,7 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
   // frozen. A retry may resume only the exact snapshotted payload and
   // idempotency key from the first attempt.
   const immutableReviewLocked = busy || msg.executeAttempted === true;
-  const reviewLocked = immutableReviewLocked || productDirty;
+  const reviewLocked = immutableReviewLocked || productDirty || productDraftActive;
   // Advisory blockers (e.g. a Cisco address on the thread with no Meraki_ISRs
   // record, when the lead source doesn't require an ISR) inform the reviewer
   // but must never disable Execute — error_reports #12.
@@ -1472,7 +1476,8 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
   function collect() {
     const missing = [];
     const d = {};
-    if (productDirty) missing.push('revalidate / re-plan the edited SKU quantities');
+    if (productDraftActive) missing.push('finish or cancel the active product edit');
+    else if (productDirty) missing.push('revalidate / re-plan the edited SKU quantities');
     if (forceCreateAccount) {
       ['name', 'street', 'city', 'state', 'zip', 'country'].forEach((f) => { if (!String(acct[f] || '').trim()) missing.push('account ' + f); });
       d.account = { create: { name: acct.name, billing: { street: acct.street, city: acct.city, state: acct.state, zip: acct.zip, country: acct.country } } };
@@ -1776,6 +1781,7 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
               title="Zoho plan products"
               updateLabel="Revalidate / re-plan"
               status={productStatus}
+              onDraftActivityChange={setProductDraftActive}
               allowHaLicenseRatio={msg.base?.ha_mode === 'warm_spare'}
             />
           )}
@@ -2132,9 +2138,10 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
             </div>
           )}
           <button
-            style={{ width: '100%', marginTop: 10, padding: '10px 14px', borderRadius: 8, border: 'none', fontSize: 13, cursor: hard.length || busy || productDirty ? 'default' : 'pointer', background: hard.length || busy || productDirty ? COLORS.BORDER : COLORS.STRATUS_BLUE, color: hard.length || busy || productDirty ? COLORS.TEXT_SECONDARY : '#fff', fontWeight: 700 }}
-            disabled={hard.length > 0 || busy || productDirty}
+            style={{ width: '100%', marginTop: 10, padding: '10px 14px', borderRadius: 8, border: 'none', fontSize: 13, cursor: hard.length || busy || productDirty || productDraftActive ? 'default' : 'pointer', background: hard.length || busy || productDirty || productDraftActive ? COLORS.BORDER : COLORS.STRATUS_BLUE, color: hard.length || busy || productDirty || productDraftActive ? COLORS.TEXT_SECONDARY : '#fff', fontWeight: 700 }}
+            disabled={hard.length > 0 || busy || productDirty || productDraftActive}
             onClick={() => {
+              if (productDraftActive) { setErr('finish or cancel the active product edit'); return; }
               if (productDirty) { setErr('revalidate / re-plan the edited SKU quantities'); return; }
               if (msg.executeAttempted === true) { onExecute(); return; }
               const col = collect();
@@ -2934,6 +2941,7 @@ export default function ChatPanel({
     const quoteHaRequested = hasExplicitMxHaIntent(text);
     const quoteLicenseTier = explicitQuoteLicenseTier(text);
     const quoteHardwareOnly = isExplicitHardwareOnlyQuoteText(text);
+    const requestedTerm = quoteModeFromText(text).term || '';
     let candidate = typedHardwareOnlyResult(result, text);
     const committedRows = editableRowsFromResult(candidate);
     const gmailParticipantSnapshot = quoteCustomerContextSnapshot({
@@ -2982,6 +2990,7 @@ export default function ChatPanel({
           quoteHaRequested,
           quoteLicenseTier,
           quoteHardwareOnly,
+          draftTerm: requestedTerm,
           ...quoteMessageProvenance,
           note: `${quoteHaRequested ? 'Explicit HA intent was detected, but ' : ''}Every action link was suppressed because the generated composition could not be verified (${verified.error}).`,
           timestamp: new Date().toISOString(),
@@ -2997,6 +3006,7 @@ export default function ChatPanel({
       quoteHaRequested,
       quoteLicenseTier,
       quoteHardwareOnly,
+      draftTerm: requestedTerm,
       ...quoteMessageProvenance,
       ...(draftRows?.length ? {
         draftRows,
@@ -3106,6 +3116,22 @@ export default function ChatPanel({
     });
   }
 
+  // Empty means the standard 1/3/5 matrix; a concrete selection replaces any
+  // stale term wording from the original prompt on the next verified rebuild.
+  function handleQuoteDraftTermChange(msg, term) {
+    const value = String(term || '');
+    if (value && !['1', '3', '5'].includes(value)) return;
+    invalidateQuoteUpdate(msg.id);
+    updateMessage(msg.id, {
+      draftTerm: value,
+      draftDirty: true,
+      draftStatus: value
+        ? `Quote term changed to ${value} year${value === '1' ? '' : 's'}. Existing links and Zoho actions are disabled until Update quote succeeds.`
+        : 'Quote term changed to All standard (1/3/5). Existing links and Zoho actions are disabled until Update quote succeeds.',
+      busy: false,
+    });
+  }
+
   function handleQuoteDraftRowsChange(msg, rows) {
     invalidateQuoteUpdate(msg.id);
     updateMessage(msg.id, {
@@ -3176,15 +3202,17 @@ export default function ChatPanel({
   }
 
 
-  async function rebuildQuoteMessage(msg, rows, { sourceText = msg?.skuText || '', tier } = {}) {
+  async function rebuildQuoteMessage(msg, rows, { sourceText = msg?.skuText || '', tier, term } = {}) {
     // An explicit dropdown pick wins over the tier inferred from the prior
     // request text; undefined means "leave the inferred tier alone".
     const tierOverride = tier === undefined ? msg?.draftTier : tier;
+    const termOverride = term === undefined ? msg?.draftTerm : term;
     const rebuildRows = rowsForLinkedQuoteRebuild(rows, {
       allowHaLicenseRatio: explicitQuoteHaRequested(msg),
     });
     const prepared = quoteTextFromEditorRows(rebuildRows, sourceText, {
       tier: tierOverride || '',
+      ...(termOverride === undefined ? {} : { term: String(termOverride || '') }),
       haRequested: explicitQuoteHaRequested(msg),
     });
     if (!prepared.ok) {
@@ -3285,7 +3313,9 @@ export default function ChatPanel({
     // unpairing, the licence total behind each hardware row after Update.
     const projectedRows = withPairedLicenseProjections(
       prepared.rows,
-      pairedProjectionSourceLines(verified.urls, termFromLicenseRows(rows) || termFromLicenseRows(prepared.rows)),
+      pairedProjectionSourceLines(verified.urls,
+        String(termOverride || '') || termFromLicenseRows(rows) || termFromLicenseRows(prepared.rows),
+      ),
       { allowHaLicenseRatio: explicitQuoteHaRequested(msg) },
     );
     updateMessage(msg.id, (current) => ({
@@ -3313,7 +3343,9 @@ export default function ChatPanel({
   // and URL-composition verification boundary.
   async function handleQuoteSuggestion(msg, suggestion, mode, rows = quoteDraftRows(msg)) {
     if (loading) return;
-    const nextRows = applySkuSuggestion(rows, suggestion, mode);
+    const nextRows = applySkuSuggestion(rows, suggestion, mode, {
+      allowHaLicenseRatio: explicitQuoteHaRequested(msg),
+    });
     handleQuoteDraftRowsChange(msg, nextRows);
     return rebuildQuoteMessage(msg, nextRows, { sourceText: msg.skuText || '' });
   }
@@ -3565,6 +3597,7 @@ export default function ChatPanel({
     intakeIntent = null,
     directSkus = null,
     zohoListPriceSkus = null,
+    directTermYears = null,
   } = {}) {
     if (oneshotPlanStartRef.current) return;
     oneshotPlanStartRef.current = true;
@@ -3590,7 +3623,9 @@ export default function ChatPanel({
         : '';
       const selectedOption = quoteOptions[selectedQuoteOptionIndex] || {};
       const hardwareOnly = selectedOption.hardwareOnly === true;
-      const termYears = Number.isInteger(selectedOption.termYears) ? selectedOption.termYears : null;
+      const termYears = Number.isInteger(selectedOption.termYears)
+        ? selectedOption.termYears
+        : ([1, 3, 5].includes(Number(directTermYears)) ? Number(directTermYears) : null);
       const haRequested = intakeIntent?.ha_requested === true;
       // The contact the panel is ALREADY showing as this chat's context. Only an
       // explicit dropdown pick used to ride along, so the card displayed
@@ -3683,8 +3718,14 @@ export default function ChatPanel({
     const rebuildRows = rowsForLinkedQuoteRebuild(rows, {
       allowHaLicenseRatio: explicitQuoteHaRequested(msg),
     });
+    const directTerm = directZohoQuoteTerm(rebuildRows, msg?.draftTerm);
+    if (!directTerm.ok) {
+      updateMessage(msg.id, { draftRows: rows, draftDirty: true, draftStatus: directTerm.error, busy: false });
+      return { success: false, error: 'zoho_only_term_required' };
+    }
     const prepared = quoteTextFromEditorRows(rebuildRows, '', {
       tier: msg?.draftTier || '',
+      ...(directTerm.term ? { term: directTerm.term } : {}),
       haRequested: explicitQuoteHaRequested(msg),
     });
     if (!prepared.ok) {
@@ -3714,6 +3755,7 @@ export default function ChatPanel({
       hardwareOnlySkus: prepared.hardwareOnlySkus,
       hardwareOnlyLines: prepared.hardwareOnlyLines,
       intakeIntent: msg?.emailQuoteContext?.intent || null,
+      directTermYears: directTerm.term ? Number(directTerm.term) : null,
     });
     updateMessage(msg.id, {
       draftRows,
@@ -4004,6 +4046,7 @@ export default function ChatPanel({
       ...(gmailParticipantSnapshot ? { gmailParticipantSnapshot } : {}),
       result: { urls: [], parsed: [], eolWarnings: [], suggestions: null, source: 'manual-quote-builder' },
       draftRows: blankQuoteEditorRows(),
+      draftTerm: '',
       draftDirty: true,
       draftStatus: 'Enter an exact SKU, select an active Zoho product, or populate from the current Gmail context.',
       note: 'Manual quote builder — review the SKU rows, then generate read-only eCommerce options.',
@@ -4601,13 +4644,18 @@ export default function ChatPanel({
                   onDraftRowsChange={msg.restored ? undefined : (rows) => handleQuoteDraftRowsChange(msg, rows)}
                   draftTier={msg.draftTier || ''}
                   onDraftTierChange={msg.restored ? undefined : (tier) => handleQuoteDraftTierChange(msg, tier)}
+                  draftTerm={msg.draftTerm}
+                  onDraftTermChange={msg.restored ? undefined : (term) => handleQuoteDraftTermChange(msg, term)}
                   onUpdateQuote={msg.restored ? undefined : (rows) => (
-                    msg.manualQuoteBuilder === true && rows.some((row) => row?.availability === 'zoho_only')
+                    // Route matrix: all eCommerce -> regular quote; any Zoho-only
+                    // -> whole-cart Zoho review; any unknown -> both paths fail
+                    // closed inside quoteTextFromEditorRows (no link, no Zoho, no CRM).
+                    msg.manualQuoteBuilder === true && quoteRouteForRows(rows).route === 'zoho_only'
                       ? startZohoOnlyManualQuote(msg, rows)
                       : rebuildQuoteMessage(msg, rows)
                   )}
                   quoteUpdateLabel={msg.manualQuoteBuilder === true && (!Array.isArray(msg.result?.urls) || msg.result.urls.length === 0)
-                    ? (draftRows.some((row) => row?.availability === 'zoho_only')
+                    ? (quoteRouteForRows(draftRows).route === 'zoho_only'
                       ? 'Continue to Zoho review'
                       : 'Generate quote')
                     : 'Update quote'}

@@ -71,9 +71,12 @@ export default function QuoteResult({
   onProductSearch,
   draftTier = '',
   onDraftTierChange,
+  draftTerm,
+  onDraftTermChange,
   allowHaLicenseRatio = false,
 }) {
   const [copiedIdx, setCopiedIdx] = useState(null);
+  const [editorDraftActive, setEditorDraftActive] = useState(false);
   // Copy/Open also select that option for Zoho. Multiple terms can be checked
   // so 1/3/5-year quotes are created under the same deal. Selection identity
   // is the reviewed option INDEX, not its URL: two semantically distinct
@@ -87,7 +90,8 @@ export default function QuoteResult({
     && typeof onUpdateQuote === 'function';
   // Suggestions are unresolved input, and edits are uncommitted input. In
   // either state every link/term/Zoho action from the prior response is stale.
-  const quoteActionsBlocked = busy || draftDirty || suggestions.length > 0;
+  const quoteActionsBlocked = busy || draftDirty || editorDraftActive || suggestions.length > 0;
+  const suggestionMutationLocked = busy || editorDraftActive;
   const validSelectedIndexes = normalizeQuoteOptionIndexes(selectedIndexes, urls.length);
   const hasExplicitTermSelection = validSelectedIndexes.length > 0;
 
@@ -153,25 +157,25 @@ export default function QuoteResult({
                   {s.suggest.map((sug, j) => (
                     <span key={j} style={{ display: 'inline-flex', gap: 2, marginRight: 6, marginTop: 4 }}>
                       <button
-                        onClick={() => !busy && onApplySuggestion?.({ ...s, suggest: [sug] })}
+                        onClick={() => !suggestionMutationLocked && onApplySuggestion?.({ ...s, suggest: [sug] })}
                         title="Replace invalid SKU with this and re-quote"
-                        disabled={busy}
+                        disabled={suggestionMutationLocked}
                         style={{
                           background: COLORS.STRATUS_LIGHT, color: COLORS.STRATUS_BLUE,
                           border: `1px solid ${COLORS.STRATUS_BLUE}44`, borderRadius: '4px 0 0 4px',
-                          padding: '2px 8px', fontSize: 12, fontWeight: 600, cursor: busy ? 'default' : 'pointer',
+                          padding: '2px 8px', fontSize: 12, fontWeight: 600, cursor: suggestionMutationLocked ? 'default' : 'pointer',
                         }}
                       >
                         {sug}
                       </button>
                       <button
-                        onClick={() => !busy && onStackSuggestion?.({ ...s, suggest: [sug] })}
+                        onClick={() => !suggestionMutationLocked && onStackSuggestion?.({ ...s, suggest: [sug] })}
                         title="Add to quote (stack)"
-                        disabled={busy}
+                        disabled={suggestionMutationLocked}
                         style={{
                           background: COLORS.STRATUS_BLUE, color: 'white',
                           border: `1px solid ${COLORS.STRATUS_BLUE}`, borderRadius: '0 4px 4px 0',
-                          padding: '2px 5px', fontSize: 11, fontWeight: 700, cursor: busy ? 'default' : 'pointer',
+                          padding: '2px 5px', fontSize: 11, fontWeight: 700, cursor: suggestionMutationLocked ? 'default' : 'pointer',
                         }}
                       >
                         +
@@ -198,6 +202,9 @@ export default function QuoteResult({
           status={draftStatus}
           tier={draftTier}
           onTierChange={onDraftTierChange}
+          term={draftTerm}
+          onTermChange={onDraftTermChange}
+          onDraftActivityChange={setEditorDraftActive}
           allowHaLicenseRatio={allowHaLicenseRatio}
         />
       )}

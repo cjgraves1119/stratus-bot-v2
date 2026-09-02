@@ -706,7 +706,11 @@ function parseExplicitSkuRequestBeforeClassifier(rawText) {
     // probabilistic V3 classifier merely because the year was written compactly.
     .replace(/\b[135]\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)\b/g, ' ')
     .replace(/\b\d+\b/g, ' ')
-    .replace(/\b(QUOTE|QUOTING|CREATE|SEND|GIVE|SHOW|NEED|I|ME|PLEASE|JUST|A|AN|THE|FOR|OF|AND|OR|WITH|WITHOUT|NO|X|YEAR|YEARS|YR|YRS|Y|TERM|TERMS|ALL|HARDWARE|HW|ONLY|LICENSE|LICENCE|LICENSING|LICENSES|LICENCES|LIC|RENEWAL|RENEWALS|RENEW|SEC|SECURITY|ENT|ENTERPRISE|SDW|SD-WAN|SD|WAN|PLUS|COMMA)\b/g, ' ')
+    // ADVANCED / ADVANTAGE / ADV is the editor's per-row MR Advanced and
+    // Catalyst/MS Advantage tier word ("4 MR36-HW advanced"). Leaving it in the
+    // residue sent an explicit SKU list to the probabilistic V3 classifier,
+    // which could drop the tier and quote LIC-ENT instead of LIC-MR-ADV.
+    .replace(/\b(QUOTE|QUOTING|CREATE|SEND|GIVE|SHOW|NEED|I|ME|PLEASE|JUST|A|AN|THE|FOR|OF|AND|OR|WITH|WITHOUT|NO|X|YEAR|YEARS|YR|YRS|Y|TERM|TERMS|ALL|HARDWARE|HW|ONLY|LICENSE|LICENCE|LICENSING|LICENSES|LICENCES|LIC|RENEWAL|RENEWALS|RENEW|SEC|SECURITY|ENT|ENTERPRISE|SDW|SD-WAN|SD|WAN|PLUS|ADVANCED|ADVANTAGE|ADV|COMMA)\b/g, ' ')
     .replace(/[,\s+*×;:(){}[\]"'`./\\-]+/g, '');
   if (residue) return null;
 
@@ -4845,13 +4849,31 @@ async function searchActiveProducts(query, env, { deadlineMs = PRODUCT_SEARCH_DE
         if (bySku.size >= PRODUCT_SEARCH_LIMIT) break;
       }
       if (bySku.size > 0) {
-        const availabilityRead = lookupActiveEcommSkus([...bySku.keys()], env, { signal: controller.signal })
+        // The storefront classification is an independent read with its own
+        // full budget. Sharing the identity read's remaining deadline starved
+        // it whenever Products/search used most of the window, so every live
+        // row came back `unknown` even though WooProducts would have answered
+        // a few hundred milliseconds later (2026-09-01).
+        const availabilityController = new AbortController();
+        let availabilityTimer = null;
+        const availabilityRead = lookupActiveEcommSkus([...bySku.keys()], env, { signal: availabilityController.signal })
           .catch((error) => {
             const code = String(error?.name || error?.code || error?.message || 'request_failed').slice(0, 120);
             console.warn(`[PRODUCT_SEARCH] Woo availability read unavailable (${code})`);
             return null;
           });
-        const availability = await Promise.race([availabilityRead, deadline]);
+        const availabilityDeadline = new Promise((resolve) => {
+          availabilityTimer = setTimeout(() => {
+            availabilityController.abort('product_availability_deadline');
+            resolve(null);
+          }, boundedDeadlineMs);
+        });
+        let availability = null;
+        try {
+          availability = await Promise.race([availabilityRead, availabilityDeadline]);
+        } finally {
+          if (availabilityTimer != null) clearTimeout(availabilityTimer);
+        }
         if (availability?.ok === true) {
           for (const [sku, row] of bySku) {
             row.availability = availability.skus.has(sku) ? 'ecomm' : 'zoho_only';
@@ -6553,9 +6575,11 @@ function clauseRequestedTier(clauseText, itemSku) {
   if (/\b(SD[-\s]?WAN|SDW)\b/.test(t) && (isMxZ || !sku)) return 'SDW';
   if ((/\bADVANCED\s+SECURITY\b/.test(t) || (/\bSEC(URITY)?\b/.test(t) && !/\bENTERPRISE\b/.test(t))) && (isMxZ || !sku || (!isSwitch && !isMrCw))) return 'SEC';
   if (/\bENT(ERPRISE)?\b/.test(t) && !/\bSEC(URITY)?\b/.test(t)) return 'ENT';
-  if (!/\bADVANCED\s+SECURITY\b/.test(t) && /\b(ADVANCED|ADV)\b/.test(t)) {
-    if (isSwitch) return 'A';
-    if (isMr || /^CW(?!9800)\d/.test(sku)) return 'A';
+  if (!/\bADVANCED\s+SECURITY\b/.test(t)) {
+    const standardAdvanced = /\b(?:ADVANCED|ADV)\b/.test(t);
+    const mrAdvantage = /\bADVANTAGE\b/.test(t);
+    if (standardAdvanced && isSwitch) return 'A';
+    if ((standardAdvanced || mrAdvantage) && (isMr || /^CW(?!9800)\d/.test(sku))) return 'A';
   }
   return null;
 }
@@ -11286,13 +11310,24 @@ function expandOneshotRequestedProducts(input) {
     if (isLicenseExemptAccessorySku(rawSku)) continue;
     const licensedQty = licensedQtyOf(line);
     if (licensedQty === 0) continue;
+    const availableLicenses = getLicenseSkus(rawSku, line.tier || undefined) || [];
     const candidate = selectOneshotLicenseSku(rawSku, term, line.tier || null);
+    // A known licensable product may not offer every globally selectable term
+    // (for example C9350 Advanced has 3Y/5Y but no 1Y). Never let that lookup
+    // miss silently turn reviewed "paired" hardware into a hardware-only plan.
+    // Products with no catalogue licence family remain unaffected, as do rows
+    // explicitly reviewed as hardware-only above.
+    if (!candidate && availableLicenses.length > 0 && !explicitByHardware.has(rawSku)) {
+      blockers.push({ code: 'license_sku_unresolved', sku: rawSku, term, tier: line.tier || null });
+      continue;
+    }
     if (candidate
         && !explicitByHardware.has(rawSku)
         && !explicitStems.has(oneshotLicenseStem(canonicalOneshotCatalogSku(candidate)))) {
       expanded.push({ sku: candidate, qty: licensedQty });
     }
   }
+  if (blockers.length) return { success: false, lines: [], blockers, ha_mode: haMode };
   return {
     success: true,
     lines: orderOneshotProductRows(aggregateOneshotLines(expanded)),
@@ -11886,7 +11921,7 @@ async function validateOneshotReviewBinding(input, env, caller) {
     'pinned_deal_account_mismatch', 'pinned_deal_contact_mismatch',
     'unresolved_sku', 'inactive_sku', 'eol_sku',
     'product_lookup_failed', 'isr_not_found',
-    'ha_mode_invalid', 'invalid_sku_quantity', 'invalid_license_tier', 'invalid_license_intent', 'ha_requires_shared_license',
+    'ha_mode_invalid', 'invalid_sku_quantity', 'invalid_license_tier', 'invalid_license_intent', 'license_sku_unresolved', 'ha_requires_shared_license',
     'ha_hardware_required', 'ha_mixed_hardware', 'ha_hardware_unsupported',
     'ha_even_hardware_quantity_required', 'ha_ambiguous_license_lines',
     'ha_license_term_conflict', 'ha_shared_license_unresolved',
@@ -35959,7 +35994,20 @@ CRITICAL URL RULES:
             // Find SKU-like tokens that parseMessage dropped (couldn't resolve to a valid item).
             // For an accessory request the host-switch token (e.g. C9200L) is CONTEXT, not an
             // item to quote or "did you mean" — drop it so it doesn't block routing to Sonnet.
-            const droppedTokens = _accessoryFind ? [] : rawSkuTokens.filter(t => !parsedSkuSet.has(t));
+            // Compare by canonical hardware code: parseMessage stores "MR36" for the
+            // typed "MR36-HW" (and "CW9162I-MR" for "CW9162"), so a spelling-only
+            // difference is not a dropped item. Treating it as one re-validated the
+            // token as a phantom tier-less line, and the composition guard then
+            // demanded LIC-ENT for an explicitly Advanced access point and blocked
+            // every "4 MR36-HW advanced" quote from the editor (2026-09-01).
+            const canonicalHardwareToken = (value) => {
+              const upper = String(value || '').trim().toUpperCase();
+              try { return publicMxMsHardwareSku(applySuffix(upper)); } catch (_) { return upper; }
+            };
+            const parsedCanonicalSkuSet = new Set([...parsedSkuSet].map(canonicalHardwareToken));
+            const droppedTokens = _accessoryFind
+              ? []
+              : rawSkuTokens.filter(t => !parsedSkuSet.has(t) && !parsedCanonicalSkuSet.has(canonicalHardwareToken(t)));
 
             // Validate ALL tokens: both parsed items and dropped tokens
             const suggestions = [];

@@ -69,6 +69,9 @@ function loadProductHelpers() {
     `const resolveCatalogSku = (sku) => String(sku).toUpperCase();`,
     `const getLicenseSkus = (sku, tier) => {
       const u=String(sku).toUpperCase();
+      if (u === 'C9350-24P-M' && String(tier || '').toUpperCase() === 'A') {
+        return ['3','5'].map((n) => ({term:n+'Y',sku:'LIC-C9350-24A-'+n+'Y'}));
+      }
       const m=u.match(/^MX(75|85|105)/);
       if (m) return ['1','3','5'].map((n) => ({term:n+'Y',sku:'LIC-MX'+m[1]+'-'+(tier||'SEC')+'-'+n+'Y'}));
       return null;
@@ -211,6 +214,38 @@ function lookupSpy() {
       { sku: 'MX75', qty: 2 },
       { sku: 'LIC-MX75-SEC-3Y', qty: 2 },
     ]);
+  });
+
+  await check('a missing selected-term companion fails closed instead of degrading paired hardware to hardware-only', async () => {
+    const oneYear = {
+      skus: [{ sku: 'C9350-24P-M', qty: 1, tier: 'advanced' }],
+      license_term: '1', include_licenses: true, ha_mode: 'standard',
+    };
+    const blocked = H.expandOneshotRequestedProducts(oneYear);
+    assert.strictEqual(blocked.success, false);
+    assert.deepStrictEqual(blocked.lines, []);
+    assert.ok(blocked.blockers.some((item) => item.code === 'license_sku_unresolved'
+      && item.sku === 'C9350-24P-M' && item.term === '1' && item.tier === 'A'));
+    const spy = lookupSpy();
+    const planned = await H.buildOneshotProductSnapshot(oneYear, {}, 'oneshot:test', spy.fn);
+    assert.strictEqual(planned.success, false);
+    assert.strictEqual(planned.product_validation_count, 0);
+    assert.strictEqual(spy.calls.length, 0);
+
+    for (const term of ['3', '5']) {
+      const allowed = H.expandOneshotRequestedProducts({ ...oneYear, license_term: term });
+      assert.strictEqual(allowed.success, true, JSON.stringify(allowed.blockers));
+      assert.deepStrictEqual(allowed.lines, [
+        { sku: 'C9350-24P-M', qty: 1 },
+        { sku: `LIC-C9350-24A-${term}Y`, qty: 1 },
+      ]);
+    }
+    const bare = H.expandOneshotRequestedProducts({
+      ...oneYear,
+      hardware_only_skus: ['C9350-24P-M'],
+    });
+    assert.strictEqual(bare.success, true, JSON.stringify(bare.blockers));
+    assert.deepStrictEqual(bare.lines, [{ sku: 'C9350-24P-M', qty: 1 }]);
   });
 
   await check('Catalyst stack kits, power supplies, and SFPs never auto-add licences', () => {

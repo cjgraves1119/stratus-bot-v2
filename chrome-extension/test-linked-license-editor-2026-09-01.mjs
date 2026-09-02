@@ -304,14 +304,13 @@ test('a suspended paired projection cannot be serialized directly and never reac
   assert.equal(quoteTextFromEditorRows(standalone, '', {}).ok, true);
 });
 
-test('a retyped hardware SKU never deletes its old projection mid-keystroke; explicit removal does', () => {
+test('a committed hardware identity replacement removes its old projection; local drafts never reach this reducer', () => {
   const paired = withDefaultPairedLicenseIntents([
     { sku: 'MX67', qty: 2 },
     { sku: 'LIC-MX67-SEC-3YR', qty: 2 },
   ]);
-  const retyped = applyLinkedQuoteRowPatch(paired, 0, { sku: 'MX6' });
-  assert.equal(retyped.length, 2, 'the orphaned projection survives while the rep is typing');
-  assert.equal(retyped[1].licenseIntent, 'paired');
+  const committed = applyLinkedQuoteRowPatch(paired, 0, { sku: 'MX6' });
+  assert.deepEqual(committed.map(({ sku, qty }) => ({ sku, qty })), [{ sku: 'MX6', qty: 2 }]);
   const removed = removeLinkedQuoteRow(paired, 0);
   assert.deepEqual(removed, []);
   // Removing the licence row itself never touches hardware.

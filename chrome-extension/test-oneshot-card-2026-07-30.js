@@ -240,7 +240,7 @@ check('Execute remains the sole write call and rejects email-shaped contact name
   assert.ok(executeCalls.length >= 1, 'Execute boundary must contain the CRM write call');
   assert.ok(!/sendToBackground\(MSG\.ONESHOT_EXECUTE/.test(SRC.replace(executeBoundary, '')), 'ONESHOT_EXECUTE must not escape executeOneshotCard');
   assert.ok(/remove the email address from the contact name/.test(SRC));
-  assert.ok(/disabled=\{hard\.length > 0 \|\| busy \|\| productDirty\}/.test(SRC), 'Execute must also block unvalidated product edits');
+  assert.ok(/disabled=\{hard\.length > 0 \|\| busy \|\| productDirty \|\| productDraftActive\}/.test(SRC), 'Execute must also block unvalidated or still-being-typed product edits');
   assert.ok(/deal = \{ new: true, confirmed: true \}/.test(SRC), 'new-deal choice must carry explicit confirmed:true');
 });
 

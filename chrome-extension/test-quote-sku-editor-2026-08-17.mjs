@@ -80,7 +80,7 @@ test('quote rebuild emits exact quantity lines and preserves hardware-only inten
 
 test('quote card hides every stale link and CRM action while rows are dirty or unresolved', () => {
   const source = readFileSync(quoteResultPath, 'utf8');
-  assert.match(source, /quoteActionsBlocked = busy \|\| draftDirty \|\| suggestions\.length > 0/);
+  assert.match(source, /quoteActionsBlocked = busy \|\| draftDirty \|\| editorDraftActive \|\| suggestions\.length > 0/);
   assert.match(source, /urls\.length > 0 && !quoteActionsBlocked/);
   assert.match(source, /Existing links, term selection, and Zoho conversion are hidden/);
 });
@@ -111,7 +111,7 @@ test('one-shot product edits force re-plan and cannot execute stale products', (
   // product fingerprint rebinds; an omitted key would silently inherit base.
   assert.match(source, /hardware_only: hardwareOnly,[\s\S]{0,400}?hardware_only_skus: Array\.isArray\(prepared\.hardwareOnlySkus\) \? prepared\.hardwareOnlySkus : \[\],\s*hardware_only_lines: Array\.isArray\(prepared\.hardwareOnlyLines\) \? prepared\.hardwareOnlyLines : \[\],/,
     'edited-product re-plan must restate whole-SKU and quantity-scoped hardware-only lines from the committed rows');
-  assert.match(source, /disabled=\{hard\.length > 0 \|\| busy \|\| productDirty\}/);
+  assert.match(source, /disabled=\{hard\.length > 0 \|\| busy \|\| productDirty \|\| productDraftActive\}/);
   assert.match(source, /Product editing is unavailable after an Execute attempt/);
   assert.match(source, /Execute remains disabled/);
   assert.match(source, /nextOneshotQuoteOptionState/);

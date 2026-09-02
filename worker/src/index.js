@@ -5574,7 +5574,11 @@ function parseExplicitSkuRequestBeforeClassifier(rawText) {
     .replace(/\bLIC-[A-Z0-9-]+\b/g, ' ')
     .replace(/\b(?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*\b/g, ' ')
     .replace(/\b\d+\b/g, ' ')
-    .replace(/\b(QUOTE|QUOTING|CREATE|SEND|GIVE|SHOW|NEED|I|ME|PLEASE|JUST|A|AN|THE|FOR|OF|AND|OR|WITH|WITHOUT|NO|X|YEAR|YEARS|YR|YRS|Y|TERM|TERMS|ALL|HARDWARE|HW|ONLY|LICENSE|LICENCE|LICENSING|LICENSES|LICENCES|LIC|RENEWAL|RENEWALS|RENEW|SEC|SECURITY|ENT|ENTERPRISE|SDW|SD-WAN|SD|WAN|PLUS|COMMA)\b/g, ' ')
+    // ADVANCED / ADVANTAGE / ADV is the editor's per-row MR Advanced and
+    // Catalyst/MS Advantage tier word ("4 MR36-HW advanced"). Leaving it in the
+    // residue sent an explicit SKU list to the probabilistic V3 classifier,
+    // which could drop the tier and quote LIC-ENT instead of LIC-MR-ADV.
+    .replace(/\b(QUOTE|QUOTING|CREATE|SEND|GIVE|SHOW|NEED|I|ME|PLEASE|JUST|A|AN|THE|FOR|OF|AND|OR|WITH|WITHOUT|NO|X|YEAR|YEARS|YR|YRS|Y|TERM|TERMS|ALL|HARDWARE|HW|ONLY|LICENSE|LICENCE|LICENSING|LICENSES|LICENCES|LIC|RENEWAL|RENEWALS|RENEW|SEC|SECURITY|ENT|ENTERPRISE|SDW|SD-WAN|SD|WAN|PLUS|ADVANCED|ADVANTAGE|ADV|COMMA)\b/g, ' ')
     .replace(/[,\s+*×;:(){}[\]"'`./\\-]+/g, '');
   if (residue) return null;
 
@@ -6346,8 +6350,11 @@ function clauseRequestedTier(clauseText, itemSku) {
   if (/\b(SD[-\s]?WAN|SDW)\b/.test(t) && (isMxZ || !sku)) return 'SDW';
   if ((/\bADVANCED\s+SECURITY\b/.test(t) || (/\bSEC(URITY)?\b/.test(t) && !/\bENTERPRISE\b/.test(t))) && (isMxZ || !sku || (!isSwitch && !isMrCw))) return 'SEC';
   if (/\bENT(ERPRISE)?\b/.test(t) && !/\bSEC(URITY)?\b/.test(t)) return 'ENT';
-  if (!/\bADVANCED\s+SECURITY\b/.test(t) && /\b(ADVANCED|ADV)\b/.test(t)) {
-    if (isSwitch || isMr || /^CW(?!9800)\d/.test(sku)) return 'A';
+  if (!/\bADVANCED\s+SECURITY\b/.test(t)) {
+    const standardAdvanced = /\b(?:ADVANCED|ADV)\b/.test(t);
+    const mrAdvantage = /\bADVANTAGE\b/.test(t);
+    if (standardAdvanced && isSwitch) return 'A';
+    if ((standardAdvanced || mrAdvantage) && (isMr || /^CW(?!9800)\d/.test(sku))) return 'A';
   }
   return null;
 }
