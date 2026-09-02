@@ -6,7 +6,8 @@ name: Source Build Checks
 # the 2026-04-25 deploy after PR #2 + PR #3 merged).
 #
 # Triggers:
-#   - pull_request to main → block PR check until all three workers build
+#   - pull_request to main or codex/reconcile-dev-1.29.12-20260901
+#     → block PR check until all three workers build
 #   - push to main → defense in depth before any later manual deployment
 #
 # No CLOUDFLARE_API_TOKEN required: `wrangler deploy --dry-run --outdir`
@@ -14,7 +15,9 @@ name: Source Build Checks
 
 on:
   pull_request:
-    branches: [main]
+    branches:
+      - main
+      - codex/reconcile-dev-1.29.12-20260901
   push:
     branches: [main]
   workflow_dispatch:
